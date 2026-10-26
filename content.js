@@ -6,6 +6,7 @@
   const X = XMuteX;
   let host, shadow, state, active = false, collapsed = false, visible = false;
   let records = [], hover = null, refreshFrame = 0, refreshTimer = 0;
+  let anchor = null, shiftHeld = false, pickGeneration = 0, pickQueue = Promise.resolve();
   let runnerBusy = false, cancelledJob = null, notice = '';
   const locked = () => ['running', 'paused'].includes(state?.job?.status);
   async function request(type, fields = {}) {
@@ -33,11 +34,13 @@
   }
   async function action(type, fields = {}) {
     try {
-      state = await request(type, fields);
+      const next = await request(type, fields);
+      state = next;
+      if (type === 'clear') anchor = null;
       setNotice('');
       render();
       scheduleRanges();
-      return true;
+      return next;
     } catch (error) { setNotice(error.message); return false; }
   }
   function createPanel() {
@@ -75,7 +78,7 @@
       '<header><div class="mark" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h10l1 11H4L5 6ZM7 6V4a3 3 0 0 1 6 0v2M7 11h6"/></svg></div><div class="heading"><h2>Mute bag <span id="count">0</span></h2><div class="identity" id="identity">Words you would rather skip</div></div>',
       '<button class="icon" id="collapse" aria-label="Collapse bag" aria-expanded="true">−</button><button class="icon" id="close" aria-label="Close bag">×</button></header>',
       '<div class="body" id="body"><button class="pick" id="pick" aria-pressed="false">Start picking words</button>',
-      '<p class="hint">Click words in posts. Edit them below, or add a phrase.</p>',
+      '<p class="hint">Click a word, then Shift-click the last word to pick a phrase. Edit or add entries below.</p>',
       '<div class="empty" id="empty">A quieter timeline starts with a word.</div><ul class="entries" id="entries" aria-label="Collected words"></ul>',
       '<form class="add" id="add-form"><input id="new-word" type="text" aria-label="Add a word or phrase" placeholder="Add a word or phrase…" maxlength="560" autocomplete="off"><button id="add" type="submit" aria-label="Add entry">+</button></form>',
       '<div class="tools"><span id="bag-info">Saved on this device</span><button id="clear">Clear bag</button></div>',
@@ -93,7 +96,12 @@
     $('collapse').onclick = () => { collapsed = !collapsed; render(); };
     $('pick').onclick = () => setPicking(!active);
     $('clear').onclick = () => action('clear');
-    $('apply').onclick = async () => { setPicking(false); await action('apply'); };
+    $('apply').onclick = async () => {
+      // Include the last Shift-click even if its bag update is still in flight.
+      await pickQueue;
+      setPicking(false);
+      await action('apply');
+    };
     $('add-form').onsubmit = async e => {
       e.preventDefault();
       if (await action('add', {text: $('new-word').value})) { $('new-word').value = ''; $('new-word').focus(); }
@@ -180,15 +188,47 @@
     host.toggleAttribute('data-light', !!rgb && rgb[0] + rgb[1] + rgb[2] > 500 && rgb[3] !== 0);
   }
   const highlights = () => CSS.highlights;
+  function joinedRange(first, last) {
+    if (first.start > last.start) [first, last] = [last, first];
+    const range = document.createRange();
+    range.setStart(first.range.startContainer, first.range.startOffset);
+    range.setEnd(last.range.endContainer, last.range.endOffset);
+    return range;
+  }
+  function phrase(first, last) {
+    if (!first || first.element !== last.element || first.source !== last.source) return null;
+    return {
+      text: C.clean(first.source.slice(Math.min(first.start, last.start), Math.max(first.end, last.end))),
+      range: joinedRange(first, last),
+    };
+  }
+  function paintHover() {
+    if (!highlights() || typeof Highlight === 'undefined') return;
+    const range = hover && (shiftHeld && anchor ? phrase(anchor, hover)?.range : hover.range);
+    highlights().set('xmb-hover', new Highlight(...(range ? [range] : [])));
+  }
   function paint() {
     if (!highlights() || typeof Highlight === 'undefined') return;
     const selected = new Set(state?.bag.map(item => item.key));
-    highlights().set('xmb-picked', new Highlight(...records.filter(r => selected.has(C.key(r.text))).map(r => r.range)));
-    highlights().set('xmb-hover', new Highlight(...(hover ? [hover.range] : [])));
+    const picked = [];
+    for (let start = 0; start < records.length; start++) {
+      const first = records[start];
+      const possible = [...selected].filter(key => key.startsWith(C.key(first.text)));
+      if (!possible.length) continue;
+      for (let end = start; end < records.length && records[end].element === first.element; end++) {
+        const last = records[end];
+        const key = C.key(first.source.slice(first.start, last.end));
+        if (!possible.some(value => value.startsWith(key))) break;
+        if (selected.has(key)) picked.push(joinedRange(first, last));
+      }
+    }
+    highlights().set('xmb-picked', new Highlight(...picked));
+    paintHover();
   }
   let highlightStyle;
   function setPicking(value) {
     active = !!value && !!state && !locked();
+    anchor = null; shiftHeld = false; pickGeneration++;
     hover = null;
     if (active) {
       if (!highlightStyle) {
@@ -230,8 +270,12 @@
         if (!start || !end) continue;
         const range = document.createRange();
         range.setStart(start.node, token.start - start.start); range.setEnd(end.node, token.end - end.start);
-        records.push({...token, range, element});
+        records.push({...token, range, element, source: text});
       }
+    }
+    if (anchor) {
+      const updated = records.find(r => r.element === anchor.element && r.source === anchor.source && r.start === anchor.start && r.end === anchor.end);
+      anchor = updated && anchor.url === location.href ? {...anchor, ...updated} : null;
     }
     hover = null; paint();
   }
@@ -244,23 +288,51 @@
   }
   function onPointer(event) {
     const found = hit(event);
-    if (found !== hover) { hover = found; paint(); }
+    if (found !== hover || shiftHeld !== event.shiftKey) {
+      hover = found; shiftHeld = event.shiftKey; paintHover();
+    }
+  }
+  async function pickWord(found, extend, generation) {
+    if (!active || generation !== pickGeneration || locked()) return;
+    // Re-resolve ranges after async bag writes or X recycling its tweet elements.
+    collectRanges();
+    found = records.find(r => r.element === found.element && r.source === found.source && r.start === found.start && r.end === found.end);
+    if (!found) return;
+    const previous = extend ? anchor : null;
+    const selection = previous ? phrase(previous, found) : {text: found.text};
+    if (!selection) {
+      setNotice('Shift-click within the same post. Click a word to start a new phrase.');
+      return;
+    }
+    const repeated = !extend && anchor?.element === found.element && anchor.source === found.source &&
+      anchor.start === found.start && anchor.end === found.end && anchor.owned?.key === C.key(found.text);
+    const next = await action('pick', {text: selection.text, replace: previous?.owned || (repeated ? anchor.owned : undefined)});
+    if (next && active && generation === pickGeneration) {
+      anchor = {...(previous || found), url: location.href, owned: next.selection.owned ? next.selection : null};
+      scheduleRanges();
+    }
   }
   function onPick(event) {
     const found = hit(event);
     if (!found || event.button !== 0) return;
     event.preventDefault(); event.stopImmediatePropagation();
     if (event.type === 'click') {
-      action('add', {text: found.text});
+      const extend = event.shiftKey, generation = pickGeneration;
+      pickQueue = pickQueue.then(() => pickWord(found, extend, generation)).catch(error => setNotice(error.message));
     }
   }
   document.addEventListener('pointermove', onPointer, true);
   for (const name of ['pointerdown', 'mousedown', 'mouseup', 'click', 'dblclick']) document.addEventListener(name, onPick, true);
   document.addEventListener('keydown', event => {
+    if (event.key === 'Shift' && active) { shiftHeld = true; paintHover(); }
     if (event.key === 'Escape' && active) {
       event.preventDefault(); event.stopImmediatePropagation(); setPicking(false);
     }
   }, true);
+  document.addEventListener('keyup', event => {
+    if (event.key === 'Shift') { shiftHeld = false; paintHover(); }
+  }, true);
+  window.addEventListener('blur', () => { shiftHeld = false; hover = null; paintHover(); });
   document.addEventListener('scroll', scheduleRanges, {capture: true, passive: true});
   window.addEventListener('resize', scheduleRanges, {passive: true});
   new MutationObserver(mutations => {

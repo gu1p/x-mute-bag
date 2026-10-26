@@ -113,10 +113,16 @@ async function handle(message, sender) {
   }
   if (message.type === 'view') return view(state, account);
   const locked = state.job?.account === account && ['running', 'paused'].includes(state.job.status);
-  if (['add', 'edit', 'remove', 'clear', 'options'].includes(message.type) && locked) {
+  if (['add', 'pick', 'edit', 'remove', 'clear', 'options'].includes(message.type) && locked) {
     throw new Error('Finish or end the current batch before editing your bag.');
   }
   switch (message.type) {
+    case 'pick': {
+      const result = C.pick(data.bag, message.text, message.replace);
+      data.bag = result.bag;
+      await persist(state);
+      return {...view(state, account), selection: result.selection};
+    }
     case 'add': data.bag = C.add(data.bag, message.text); break;
     case 'edit': data.bag = C.edit(data.bag, message.id, message.text); break;
     case 'remove': data.bag = data.bag.filter(item => item.id !== message.id); break;

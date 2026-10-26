@@ -51,6 +51,15 @@ test('concurrent bag mutations serialize and do not lose entries', async () => {
   await h.message('add', {account: '__proto__', text: 'safe'});
   assert.equal(h.store().accounts.__proto__.bag[0].text, 'safe');
 });
+test('phrase replacement is atomic and paused jobs reject picker mutations', async () => {
+  const h = harness();
+  const first = await h.message('pick', {text: 'John'});
+  const full = await h.message('pick', {text: 'John Smith', replace: first.selection});
+  assert.deepEqual(full.bag.map(i => i.text), ['John Smith']);
+  await h.message('apply');
+  await assert.rejects(h.message('pick', {text: 'John Smith Junior', replace: full.selection}), /current batch/);
+  assert.equal(h.store().job.items[0].text, 'John Smith');
+});
 test('batch isolates its tab, checkpoints before Save, and removes only confirmed entries', async () => {
   const h = harness();
   for (const text of ['one', 'two', 'three']) await h.message('add', {text});

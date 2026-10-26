@@ -32,6 +32,20 @@
     if (bag.some(item => item.id !== id && item.key === next.key)) throw new Error('That entry is already in your bag.');
     return bag.map(item => item.id === id ? next : item);
   }
+  function pick(bag, text, replace) {
+    // A Shift-click may replace only the unchanged entry created by this gesture.
+    const previous = bag.find(item => item.id === replace?.id && item.key === replace?.key);
+    const next = entry(text, previous?.id);
+    const duplicate = bag.find(item => item.id !== previous?.id && item.key === next.key);
+    if (duplicate) return {
+      bag: previous ? bag.filter(item => item.id !== previous.id) : bag,
+      selection: {id: duplicate.id, key: duplicate.key, owned: false},
+    };
+    return {
+      bag: previous ? bag.map(item => item.id === previous.id ? next : item) : [...bag, next],
+      selection: {id: next.id, key: next.key, owned: true},
+    };
+  }
   function tokens(text, locale) {
     let segmenter;
     try { segmenter = new Intl.Segmenter(locale || undefined, {granularity: 'word'}); }
@@ -65,7 +79,7 @@
     for (const item of job?.items || []) if (item.status in count) count[item.status]++;
     return count;
   }
-  const api = {DEFAULTS, clean, key, accountKey, entry, options, add, edit, tokens, createJob, finishItem, counts};
+  const api = {DEFAULTS, clean, key, accountKey, entry, options, add, edit, pick, tokens, createJob, finishItem, counts};
   globalThis.XMuteCore = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

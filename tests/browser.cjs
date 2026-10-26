@@ -51,7 +51,7 @@ async function until(probe, label, timeout = 15000) {
     await toggle();
     const panel = page.locator('#x-mute-bag');
     await panel.getByRole('button', {name: /Picking words/}).waitFor();
-    async function pick(word, occurrence = 0) {
+    async function pick(word, occurrence = 0, shift = false) {
       const point = await page.evaluate(({word, occurrence}) => {
         const walker = document.createTreeWalker(document.querySelector('main'), NodeFilter.SHOW_TEXT);
         let node, found = 0;
@@ -65,8 +65,11 @@ async function until(probe, label, timeout = 15000) {
         }
         throw new Error('Word not found: ' + word);
       }, {word, occurrence});
-      await page.mouse.move(point.x, point.y);
-      await page.mouse.click(point.x, point.y);
+      if (shift) await page.keyboard.down('Shift');
+      try {
+        await page.mouse.move(point.x, point.y);
+        await page.mouse.click(point.x, point.y);
+      } finally { if (shift) await page.keyboard.up('Shift'); }
     }
     async function add(text) {
       await panel.getByRole('textbox', {name: 'Add a word or phrase', exact: true}).fill(text);
@@ -108,6 +111,31 @@ async function until(probe, label, timeout = 15000) {
     await until(async () => (await store()).accounts.tester.bag.length === 1, 'dynamically loaded tweet');
     await panel.getByRole('button', {name: 'Clear bag'}).click();
     console.log('PASS: picker, duplicate clicks, links, inline ranges, editing, Escape, reload and new tweets');
+
+    await page.evaluate(() => {
+      const article = document.createElement('article'); article.dataset.testid = 'tweet';
+      article.innerHTML = '<div data-testid="tweetText" lang="en">John <span>Paul</span>\n<a href="/Smith">Smith</a> Junior.</div>';
+      document.querySelector('#spacer').before(article);
+    });
+    await delay(150);
+    await pick('John'); await pick('Smith', 0, true);
+    await until(async () => {
+      const bag = (await store()).accounts.tester.bag;
+      return bag.length === 1 && bag[0].text === 'John Paul Smith';
+    }, 'Shift-click full name');
+    assert.equal(await page.evaluate(() => [...CSS.highlights.get('xmb-picked')].some(r => r.toString().replace(/\s+/g, ' ').trim() === 'John Paul Smith')), true);
+    assert.equal(page.url(), 'https://x.com/home');
+    await pick('Junior', 0, true);
+    await until(async () => (await store()).accounts.tester.bag[0].text === 'John Paul Smith Junior', 'extend phrase');
+    await panel.getByRole('button', {name: 'Clear bag'}).click();
+    await pick('Smith'); await pick('John', 0, true);
+    await until(async () => (await store()).accounts.tester.bag[0].text === 'John Paul Smith', 'backwards phrase');
+    await panel.getByRole('button', {name: 'Apply 1 muted word', exact: true}).click();
+    await until(async () => (await store()).job.status === 'complete', 'save picked phrase', 30000);
+    assert.equal(model.saves.length, 1);
+    assert.equal(model.saves[0].text, 'John Paul Smith');
+    model.saves = [];
+    console.log('PASS: Shift-click names, phrase highlighting, extending, reverse selection and a single saved phrase');
 
     model.words = [{text: 'existing'}];
     for (const word of ['existing', 'new one', 'new two']) await add(word);

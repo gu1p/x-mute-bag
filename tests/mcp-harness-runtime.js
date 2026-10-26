@@ -117,7 +117,7 @@ async function mountHarness(sources, fixture) {
     el('add-form').dispatchEvent(new (win().Event)('submit', {bubbles: true, cancelable: true}));
     await until(() => bag().some(i => i.text === text), 'add ' + text);
   }
-  async function pick(text) {
+  async function pick(text, shiftKey = false, hoverOnly = false, wait = true) {
     const w = win();
     const walker = w.document.createTreeWalker(w.document.querySelector('main'), w.NodeFilter.SHOW_TEXT);
     let node;
@@ -126,10 +126,10 @@ async function mountHarness(sources, fixture) {
       if (offset < 0 || !node.parentElement.closest('[data-testid=tweetText]')) continue;
       const range = w.document.createRange(); range.setStart(node, offset); range.setEnd(node, offset + text.length);
       const rect = range.getBoundingClientRect();
-      const init = {bubbles: true, cancelable: true, composed: true, clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2, button: 0};
+      const init = {bubbles: true, cancelable: true, composed: true, clientX: rect.x + rect.width / 2, clientY: rect.y + rect.height / 2, button: 0, shiftKey};
       node.parentElement.dispatchEvent(new w.MouseEvent('pointermove', init));
-      node.parentElement.dispatchEvent(new w.MouseEvent('click', init));
-      await sleep(100); return;
+      if (!hoverOnly) node.parentElement.dispatchEvent(new w.MouseEvent('click', init));
+      if (wait) await sleep(100); return;
     }
     throw Error('Word missing: ' + text);
   }
@@ -181,6 +181,68 @@ async function mountHarness(sources, fixture) {
       pass('Sequential Apply, native options, duplicate skipping, confirmed saves and feed preservation');
       return results;
     },
+    async phrases() {
+      if (!panel()) await toggle();
+      await click('clear');
+      if (el('pick').getAttribute('aria-pressed') !== 'true') await click('pick');
+      const article = win().document.createElement('article'); article.dataset.testid = 'tweet';
+      article.innerHTML = '<div data-testid="tweetText" lang="en">John <span>Paul</span>\n<a href="/Smith">Smith</a> Junior met Jean-Luc Picard.</div>';
+      win().document.querySelector('#spacer').before(article);
+      await sleep(150);
+      await pick('John'); await pick('John');
+      await pick('Smith', true, true);
+      const preview = [...win().CSS.highlights.get('xmb-hover')].map(r => r.toString().replace(/\s+/g, ' ').trim());
+      assert(preview.join('|') === 'John Paul Smith', 'Shift hover previews full phrase: ' + preview);
+      await pick('Smith', true);
+      assert(bag().length === 1 && bag()[0].text === 'John Paul Smith', 'full name replaces first word');
+      assert([...win().CSS.highlights.get('xmb-picked')].some(r => r.toString().replace(/\s+/g, ' ').trim() === 'John Paul Smith'), 'saved phrase stays highlighted');
+      await pick('Junior', true);
+      assert(bag().length === 1 && bag()[0].text === 'John Paul Smith Junior', 'successive Shift clicks extend one phrase');
+      await pick('Paul', true);
+      assert(bag().length === 1 && bag()[0].text === 'John Paul', 'successive Shift clicks shrink the same phrase');
+      await pick('Café', true);
+      assert(bag().length === 1 && el('notice').textContent.includes('same post'), 'cannot span separate tweets');
+      await click('clear');
+      await pick('Smith'); await pick('John', true);
+      assert(bag().length === 1 && bag()[0].text === 'John Paul Smith', 'backwards selection');
+      await click('clear');
+      await pick('Jean'); await pick('Picard', true);
+      assert(bag()[0]?.text === 'Jean-Luc Picard', 'internal punctuation preserved');
+      await click('clear'); await add('John');
+      await pick('John'); await pick('Smith', true);
+      assert(bag().map(i => i.text).join('|') === 'John|John Paul Smith', 'independent single word preserved');
+      await click('clear'); await add('John Paul Smith');
+      await pick('John'); await pick('Smith', true);
+      assert(bag().length === 1 && bag()[0].text === 'John Paul Smith', 'existing phrase deduplicated');
+      await click('clear');
+      await pick('John', false, false, false); await pick('Smith', true, false, false);
+      await until(() => bag().length === 1 && bag()[0].text === 'John Paul Smith', 'rapid clicks');
+      assert(win().location.href === 'about:blank', 'Shift-click link did not navigate');
+      // Scrolling and rebuilding text ranges must keep the initial word.
+      win().dispatchEvent(new (win().Event)('resize')); await sleep(100);
+      await pick('Junior', true);
+      assert(bag()[0]?.text === 'John Paul Smith Junior', 'anchor survives range refresh');
+      await click('clear'); await pick('John');
+      win().document.dispatchEvent(new (win().KeyboardEvent)('keydown', {key: 'Escape', bubbles: true}));
+      await click('pick'); await pick('Smith', true);
+      assert(bag().map(i => i.text).join('|') === 'John|Smith', 'Escape resets the anchor');
+      await click('clear');
+      // X can reuse a tweet element for a different post: never extend an old range.
+      await pick('John');
+      article.querySelector('[data-testid=tweetText]').textContent = 'Alice Cooper';
+      await sleep(150); await pick('Cooper', true);
+      assert(bag().map(i => i.text).join('|') === 'John|Cooper', 'changed tweet invalidates anchor');
+      await click('clear');
+      await pick('Alice'); await pick('Cooper', true, false, false);
+      const savesBefore = model.saves.length;
+      await click('apply');
+      await until(() => store().job.status === 'complete', 'saving picked expression', 25000);
+      assert(model.saves.length === savesBefore + 1 && model.saves.at(-1).text === 'Alice Cooper', 'one expression produces one native save');
+      assert(!bag().length, 'saved expression leaves the bag');
+      model.saves = []; model.words = [];
+      pass('Shift-click names, preview, reverse ranges, punctuation, duplicates, rapid clicks and anchor lifecycle');
+      return results;
+    },
     async failures() {
       model.fail = 'fail word';
       await add('first success'); await add('fail word'); await add('last pending');
@@ -215,5 +277,5 @@ async function mountHarness(sources, fixture) {
       return results;
     },
   };
-  return {ready: true, tests: ['selection', 'apply', 'failures', 'stopAndAccount']};
+  return {ready: true, tests: ['selection', 'phrases', 'apply', 'failures', 'stopAndAccount']};
 }

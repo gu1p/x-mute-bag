@@ -11,6 +11,7 @@ const bridge = [
   'onMessage: {addListener(fn) {listener=fn;}},',
   'async sendMessage(m) {try {',
   'if(m.type === "runner:discover") return {ok:true,value:null};',
+  'if(m.type === "pick") {const result=XMuteCore.pick(preview.bag,m.text,m.replace);preview.bag=result.bag;return {ok:true,value:{...structuredClone(preview),selection:result.selection}};}',
   'if(m.type === "add") preview.bag=XMuteCore.add(preview.bag,m.text);',
   'else if(m.type === "edit") preview.bag=XMuteCore.edit(preview.bag,m.id,m.text);',
   'else if(m.type === "remove") preview.bag=preview.bag.filter(i=>i.id!==m.id);',

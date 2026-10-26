@@ -26,6 +26,36 @@ test('settings require a destination and valid X choices', () => {
   assert.throws(() => C.options({...C.DEFAULTS, duration: '5d'}), /valid/);
   assert.deepEqual(C.options(C.DEFAULTS), C.DEFAULTS);
 });
+test('phrase picking replaces only its own provisional word and keeps one entry', () => {
+  const first = C.pick([], 'John');
+  const full = C.pick(first.bag, 'John\n Smith', first.selection);
+  assert.deepEqual(full.bag.map(i => i.text), ['John Smith']);
+  assert.equal(full.bag[0].id, first.bag[0].id);
+  const extended = C.pick(full.bag, 'John Smith Junior', full.selection);
+  assert.deepEqual(extended.bag.map(i => i.text), ['John Smith Junior']);
+  assert.equal(extended.selection.owned, true);
+});
+test('existing or edited bag entries are not consumed by phrase picking', () => {
+  const bag = C.add([], 'John');
+  const first = C.pick(bag, 'JOHN');
+  assert.equal(first.selection.owned, false);
+  const full = C.pick(first.bag, 'John Smith');
+  assert.deepEqual(full.bag.map(i => i.text), ['John', 'John Smith']);
+  const initial = C.pick([], 'John');
+  const edited = C.edit(initial.bag, initial.selection.id, 'some other phrase');
+  assert.deepEqual(C.pick(edited, 'John Smith', initial.selection).bag.map(i => i.text), ['some other phrase', 'John Smith']);
+});
+test('an existing phrase absorbs a provisional word without becoming owned', () => {
+  const initial = C.pick(C.add([], 'John Smith'), 'John');
+  const full = C.pick(initial.bag, 'JOHN SMITH', initial.selection);
+  assert.deepEqual(full.bag.map(i => i.text), ['John Smith']);
+  assert.equal(full.selection.owned, false);
+});
+test('an invalid phrase cannot remove the provisional selection', () => {
+  const initial = C.pick([], 'John');
+  assert.throws(() => C.pick(initial.bag, 'a'.repeat(281), initial.selection), /280/);
+  assert.deepEqual(initial.bag.map(i => i.text), ['John']);
+});
 test('job snapshots bag and counts confirmations separately from unresolved entries', () => {
   const bag = C.add(C.add([], 'one'), 'two');
   const job = C.createJob('person', bag, C.DEFAULTS, 1);
