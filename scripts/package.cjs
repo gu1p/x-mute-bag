@@ -1,0 +1,13 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const {execFileSync} = require('node:child_process');
+const root = path.resolve(__dirname, '..');
+const files = ['manifest.json', 'core.js', 'background.js', 'x-adapter.js', 'content.js', 'README.md', 'icons'];
+const destination = path.join(root, 'dist', 'x-mute-bag');
+fs.mkdirSync(destination, {recursive: true});
+for (const file of files) fs.cpSync(path.join(root, file), path.join(destination, file), {recursive: true});
+const zip = path.join(root, 'dist', 'x-mute-bag.zip');
+fs.rmSync(zip, {force: true});
+execFileSync('zip', ['-qr', zip, 'x-mute-bag'], {cwd: path.join(root, 'dist')});
+console.log('Unpacked extension: ' + destination);
+console.log('Archive: ' + zip);

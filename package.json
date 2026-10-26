@@ -1,0 +1,13 @@
+{
+  "name": "x-mute-bag",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A local-first Chrome extension for picking and muting words on X",
+  "scripts": {
+    "test": "node --test tests/core.test.cjs tests/background.test.cjs",
+    "test:browser": "node tests/browser.cjs",
+    "check": "node --check core.js && node --check background.js && node --check x-adapter.js && node --check content.js && npm test && npm run test:browser",
+    "package": "node scripts/package.cjs"
+  },
+  "devDependencies": {"playwright": "1.58.0"}
+}

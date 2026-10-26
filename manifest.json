@@ -1,0 +1,20 @@
+{
+  "manifest_version": 3,
+  "name": "X Mute Bag",
+  "version": "1.0.0",
+  "description": "Pick words from posts, review your bag, and add them to X’s muted words.",
+  "minimum_chrome_version": "120",
+  "permissions": ["storage", "scripting"],
+  "host_permissions": ["https://x.com/*"],
+  "background": {"service_worker": "background.js"},
+  "action": {
+    "default_title": "Pick words on X",
+    "default_icon": {"16": "icons/icon16.png", "32": "icons/icon32.png"}
+  },
+  "icons": {"16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png", "128": "icons/icon128.png"},
+  "content_scripts": [{
+    "matches": ["https://x.com/*"],
+    "js": ["core.js", "x-adapter.js", "content.js"],
+    "run_at": "document_idle"
+  }]
+}

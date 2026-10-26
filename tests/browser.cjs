@@ -1,0 +1,183 @@
+const {chromium} = require('playwright');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const fixture = fs.readFileSync(path.join(__dirname, 'fixture.html'), 'utf8');
+const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+async function until(probe, label, timeout = 15000) {
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    const value = await probe();
+    if (value) return value;
+    await delay(100);
+  }
+  throw new Error('Timed out: ' + label);
+}
+(async () => {
+  const context = await chromium.launchPersistentContext('', {
+    ...(process.env.XMB_BROWSER ? {executablePath: process.env.XMB_BROWSER} : {channel: 'chromium'}),
+    headless: process.env.XMB_HEADED !== '1',
+    args: ['--disable-extensions-except=' + root, '--load-extension=' + root, '--no-first-run'],
+    viewport: {width: 1280, height: 900},
+  });
+  const model = {account: 'tester', words: [], saves: [], fail: null, uncertain: null, saveDelay: 0};
+  const errors = [];
+  context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
+  await context.route('https://x.com/**', async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === '/__fixture/state') return route.fulfill({json: {account: model.account, words: model.words}});
+    if (url.pathname === '/__fixture/save') {
+      const value = route.request().postDataJSON();
+      model.saves.push(value);
+      if (model.saveDelay) await delay(model.saveDelay);
+      if (model.fail === value.text) return route.fulfill({json: {error: 'Try again later: fixture failure'}});
+      if (model.words.some(word => word.text.toLowerCase() === value.text.toLowerCase())) return route.fulfill({json: {error: 'This word is already muted'}});
+      model.words.push(value);
+      if (model.uncertain === value.text) return route.fulfill({json: {error: 'Try again: saved but response lost'}});
+      return route.fulfill({json: {ok: true}});
+    }
+    return route.fulfill({contentType: 'text/html', body: fixture});
+  });
+  try {
+    const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', {timeout: 10000});
+    const page = await context.newPage();
+    await page.goto('https://x.com/home');
+    await page.locator('[data-testid=tweetText]').first().waitFor();
+    const store = () => worker.evaluate(async () => (await chrome.storage.local.get('xMuteBag')).xMuteBag);
+    const tabId = await worker.evaluate(async () => (await chrome.tabs.query({url: 'https://x.com/home'}))[0].id);
+    // Exercise the same callback Chrome invokes for an actual toolbar click.
+    const toggle = () => worker.evaluate(id => activateTab({id, url: 'https://x.com/home'}), tabId);
+    await toggle();
+    const panel = page.locator('#x-mute-bag');
+    await panel.getByRole('button', {name: /Picking words/}).waitFor();
+    async function pick(word, occurrence = 0) {
+      const point = await page.evaluate(({word, occurrence}) => {
+        const walker = document.createTreeWalker(document.querySelector('main'), NodeFilter.SHOW_TEXT);
+        let node, found = 0;
+        while ((node = walker.nextNode())) {
+          if (!node.parentElement.closest('[data-testid=tweetText]')) continue;
+          const index = node.data.indexOf(word);
+          if (index < 0 || found++ !== occurrence) continue;
+          const range = document.createRange(); range.setStart(node, index); range.setEnd(node, index + word.length);
+          const rect = range.getBoundingClientRect();
+          return {x: rect.x + rect.width / 2, y: rect.y + rect.height / 2};
+        }
+        throw new Error('Word not found: ' + word);
+      }, {word, occurrence});
+      await page.mouse.move(point.x, point.y);
+      await page.mouse.click(point.x, point.y);
+    }
+    async function add(text) {
+      await panel.getByRole('textbox', {name: 'Add a word or phrase', exact: true}).fill(text);
+      await panel.getByRole('button', {name: 'Add entry', exact: true}).click();
+      await until(async () => (await store()).accounts.tester.bag.some(i => i.text === text), 'bag add ' + text);
+    }
+    await pick('Café');
+    await until(async () => (await store()).accounts.tester.bag.length === 1, 'word picked');
+    await pick('Café');
+    await pick('#Topic');
+    await until(async () => (await store()).accounts.tester.bag.length === 2, 'hashtag picked');
+    assert.equal(await page.evaluate(() => window.tweetClicks || 0), 0);
+    assert.equal(page.url(), 'https://x.com/home');
+    // An inline word split across elements is still one range.
+    await pick('multi');
+    await until(async () => (await store()).accounts.tester.bag.some(i => i.text === 'multipart'), 'split word picked');
+    await panel.getByRole('textbox', {name: 'Edit multipart', exact: true}).fill('long phrase');
+    await panel.getByRole('textbox', {name: 'Edit multipart', exact: true}).press('Enter');
+    await until(async () => (await store()).accounts.tester.bag.some(i => i.text === 'long phrase'), 'entry edited');
+    await panel.getByRole('button', {name: 'Remove long phrase', exact: true}).click();
+    await panel.getByRole('button', {name: 'Collapse bag'}).click();
+    await panel.getByRole('button', {name: 'Expand bag'}).click();
+    await page.keyboard.press('Escape');
+    await panel.getByRole('button', {name: 'Start picking words'}).waitFor();
+    await pick('dogs');
+    assert.equal(await page.evaluate(() => window.tweetClicks), 1);
+    await page.reload();
+    await page.locator('[data-testid=tweetText]').first().waitFor();
+    await toggle();
+    await panel.getByRole('textbox', {name: 'Edit Café', exact: true}).waitFor();
+    await panel.getByRole('button', {name: 'Clear bag'}).click();
+    await page.evaluate(() => {
+      const article = document.createElement('article'); article.dataset.testid = 'tweet';
+      article.innerHTML = '<div data-testid="tweetText" lang="pt">Novíssima palavra.</div>';
+      document.querySelector('#spacer').before(article);
+    });
+    await delay(150);
+    await pick('Novíssima');
+    await until(async () => (await store()).accounts.tester.bag.length === 1, 'dynamically loaded tweet');
+    await panel.getByRole('button', {name: 'Clear bag'}).click();
+    console.log('PASS: picker, duplicate clicks, links, inline ranges, editing, Escape, reload and new tweets');
+
+    model.words = [{text: 'existing'}];
+    for (const word of ['existing', 'new one', 'new two']) await add(word);
+    await panel.locator('summary').click();
+    await panel.getByLabel('Home timeline', {exact: true}).uncheck();
+    await panel.getByLabel('Notification audience', {exact: true}).selectOption('unfollowed');
+    await panel.getByLabel('Mute duration', {exact: true}).selectOption('7d');
+    await page.evaluate(() => scrollTo(0, 100));
+    const beforeScroll = await page.evaluate(() => scrollY);
+    await panel.getByRole('button', {name: 'Apply 3 muted words', exact: true}).click();
+    await until(async () => (await store()).job?.status === 'complete', 'three-entry batch', 30000);
+    const completed = await store();
+    assert.deepEqual(completed.job.items.map(i => i.status), ['skipped', 'added', 'added']);
+    assert.equal(completed.accounts.tester.bag.length, 0);
+    assert.equal(model.saves.length, 2);
+    for (const save of model.saves) assert.deepEqual({home: save.home, notifications: save.notifications, audience: save.audience, duration: save.duration}, {home: false, notifications: true, audience: 1, duration: 2});
+    assert.equal(page.url(), 'https://x.com/home');
+    assert.equal(await page.evaluate(() => scrollY), beforeScroll);
+    assert.equal(await worker.evaluate(id => chrome.tabs.get(id).then(() => true, () => false), completed.job.tabId), false);
+    console.log('PASS: sequential Apply, duplicate skip, settings, confirmed results, owned-tab closure and original scroll');
+
+    model.fail = 'fail word';
+    await add('first success'); await add('fail word'); await add('last pending');
+    await panel.getByRole('button', {name: 'Apply 3 muted words', exact: true}).click();
+    await until(async () => (await store()).job?.status === 'paused', 'partial failure', 30000);
+    assert.deepEqual((await store()).accounts.tester.bag.map(i => i.text), ['fail word', 'last pending']);
+    model.fail = null;
+    await panel.getByRole('button', {name: 'Resume / retry', exact: true}).click();
+    await until(async () => (await store()).job.status === 'complete', 'retry remaining words', 30000);
+    assert.equal(model.saves.filter(s => s.text === 'first success').length, 1);
+    console.log('PASS: partial failure retains pending words and retry does not repeat confirmed saves');
+
+    model.uncertain = 'uncertain';
+    await add('uncertain');
+    await panel.getByRole('button', {name: 'Apply 1 muted word', exact: true}).click();
+    await until(async () => (await store()).job.status === 'paused', 'uncertain save', 30000);
+    await panel.getByRole('button', {name: 'Resume / retry', exact: true}).click();
+    await until(async () => (await store()).job.status === 'complete', 'uncertain save recovery', 30000);
+    assert.equal(model.saves.filter(s => s.text === 'uncertain').length, 1);
+    model.uncertain = null;
+    console.log('PASS: uncertain save is reconciled from the list without resubmission');
+
+    model.saveDelay = 1200;
+    await add('stop first'); await add('stop second');
+    await panel.getByRole('button', {name: 'Apply 2 muted words', exact: true}).click();
+    await until(() => model.saves.some(s => s.text === 'stop first'), 'in-flight save');
+    await panel.getByRole('button', {name: 'Stop', exact: true}).click();
+    await delay(1600);
+    assert.equal((await store()).job.status, 'paused');
+    assert.equal(model.saves.some(s => s.text === 'stop second'), false);
+    const pausedTab = (await store()).job.tabId;
+    await worker.evaluate(id => chrome.tabs.remove(id), pausedTab);
+    model.saveDelay = 0;
+    await panel.getByRole('button', {name: 'Resume / retry', exact: true}).click();
+    await until(async () => (await store()).job.status === 'complete', 'resume closed tab', 30000);
+    assert.equal(model.saves.filter(s => s.text === 'stop first').length, 1);
+    console.log('PASS: Stop prevents the next save; Resume recreates a closed settings tab');
+
+    // Mutating only the fixture’s account identity must never submit for another account.
+    model.account = 'different';
+    await add('account guard');
+    await panel.getByRole('button', {name: 'Apply 1 muted word', exact: true}).click();
+    await until(async () => (await store()).job.status === 'paused', 'account mismatch', 30000);
+    assert.equal(model.saves.some(s => s.text === 'account guard'), false);
+    model.account = 'tester';
+    await panel.getByRole('button', {name: 'End batch', exact: true}).click();
+    console.log('PASS: account mismatch pauses before saving');
+    fs.mkdirSync(path.join(root, 'artifacts'), {recursive: true});
+    await page.screenshot({path: path.join(root, 'artifacts', 'browser-fixture.png')});
+    assert.deepEqual(errors, []);
+    console.log('All browser checks passed with the actual unpacked extension.');
+  } finally { await context.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });
