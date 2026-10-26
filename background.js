@@ -40,10 +40,12 @@ function accountState(state, account) {
   });
   const data = state.accounts[account];
   data.filter ||= {enabled: true, terms: [], syncedAt: 0, lastAttemptAt: 0, error: ''};
+  data.replyRules ||= [];
   return data;
 }
 function filterView(state, account) {
-  return {filter: accountState(state, account).filter, syncing: state.filterSync?.account === account && state.filterSync.status === 'running'};
+  const data = accountState(state, account);
+  return {filter: data.filter, replyRules: data.replyRules, syncing: state.filterSync?.account === account && state.filterSync.status === 'running'};
 }
 async function closeSync(state, error = '') {
   const sync = state.filterSync;
@@ -162,6 +164,21 @@ async function handle(message, sender) {
   const account = C.accountKey(message.account);
   const data = accountState(state, account);
   if (message.type.startsWith('filters:')) return filters(message, sender, state, account);
+  if (message.type.startsWith('replies:')) {
+    const handle = C.userHandle(message.handle);
+    const rule = data.replyRules.find(item => item.handle === handle);
+    if (message.type === 'replies:add') {
+      if (rule) rule.enabled = true;
+      else data.replyRules.push({handle, enabled: true});
+    } else if (message.type === 'replies:toggle') {
+      if (!rule || typeof message.enabled !== 'boolean') throw new Error('Choose an existing account rule to enable or disable.');
+      rule.enabled = message.enabled;
+    } else if (message.type === 'replies:remove') {
+      data.replyRules = data.replyRules.filter(item => item.handle !== handle);
+    } else throw new Error('Unsupported account rule request.');
+    await persist(state);
+    return view(state, account);
+  }
   const isRunner = message.type.startsWith('runner:');
   if (isRunner) {
     const job = currentJob(state, account);

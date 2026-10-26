@@ -1,6 +1,6 @@
 {
   "name": "x-mute-bag",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "description": "A local-first Chrome extension for picking and muting words on X",
   "scripts": {

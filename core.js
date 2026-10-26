@@ -100,7 +100,12 @@
       return patterns.some(pattern => pattern.test(normalized));
     };
   }
-  const api = {DEFAULTS, FILTER_SYNC_MS, FILTER_CACHE_MS, clean, key, accountKey, entry, options, add, edit, pick, tokens, createJob, finishItem, counts, muteDeadline, muteMatcher};
+  function userHandle(value) {
+    const handle = typeof value === 'string' ? value.trim().replace(/^https:\/\/(?:www\.)?x\.com\/([^/?#]+)\/?(?:[?#].*)?$/i, '$1').replace(/^@/, '') : '';
+    if (!/^[a-zA-Z0-9_]{1,15}$/.test(handle)) throw new Error('Enter an X @username or profile link.');
+    return handle.toLowerCase();
+  }
+  const api = {DEFAULTS, FILTER_SYNC_MS, FILTER_CACHE_MS, clean, key, accountKey, userHandle, entry, options, add, edit, pick, tokens, createJob, finishItem, counts, muteDeadline, muteMatcher};
   globalThis.XMuteCore = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

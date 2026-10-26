@@ -66,6 +66,7 @@
       '.add{display:flex;gap:7px;margin-top:10px}.add input{flex:1;width:100%}.add button{padding:7px 12px}',
       '.tools{display:flex;justify-content:space-between;align-items:center;margin:10px 0;color:#a0adbe;font-size:12px}.tools button{border:0;padding:2px 0;font-size:12px;text-decoration:underline}',
       '.filter{border-top:1px solid #344052;margin-top:12px;padding-top:12px;font-size:12px}.filter label{display:flex;align-items:center;gap:6px}.filter button{font-size:12px;margin-top:8px}.filter p{margin:7px 0;color:#a0adbe}',
+      '.rules{list-style:none;padding:0;margin:12px 0 0;display:grid;gap:7px;max-height:180px;overflow:auto}.rule{display:flex;align-items:center;gap:6px;font-size:12px}.rule label{display:flex;align-items:center;gap:6px;flex:1}.rule button{border:0;padding:3px 7px}.accounts summary{color:inherit;font-weight:600}.accounts .hint{margin-bottom:8px}',
       'details{border-top:1px solid #344052;padding-top:11px;margin-top:12px}summary{cursor:pointer;font-size:12px;color:#a0adbe}.options{display:grid;gap:9px;padding-top:12px;font-size:12px}.options label{display:flex;align-items:center;gap:7px}.options select{margin-left:auto;max-width:195px;font-size:12px}input[type=checkbox]{accent-color:#8fe4c0}',
       '.apply{margin-top:14px;width:100%;background:#b8f4da;color:#163d2f;border-color:#b8f4da;font-weight:700;padding:10px}.apply:hover{background:#9ee6c8}',
       '.status{margin:12px 0 0;padding:10px 12px;background:#ffffff08;border-radius:10px;font-size:12px;overflow-wrap:anywhere}.progress{height:4px;background:#344052;border-radius:3px;margin:9px 0}.bar{height:100%;background:#8fe4c0;border-radius:3px;transition:width .2s}',
@@ -89,6 +90,9 @@
       '<label>Duration<select id="duration" aria-label="Mute duration"><option value="forever">Forever</option><option value="24h">24 hours</option><option value="7d">7 days</option><option value="30d">30 days</option></select></label>',
       '</div></details><button class="apply" id="apply">Apply muted words</button>',
       '<div class="filter"><label><input id="filter-enabled" type="checkbox" checked>Hide muted posts, including quotes</label><p id="filter-info" role="status"></p><button id="sync-muted">Sync muted words</button></div>',
+      '<details class="accounts" open><summary>Account filters <span id="reply-count"></span></summary><p class="hint">Hide replies to other accounts and their attached context in feeds. Keep original posts and self-threads.</p>',
+      '<form class="add" id="reply-form"><input id="reply-handle" type="text" aria-label="Hide replies from account" placeholder="@username or X profile link" list="reply-suggestions" autocomplete="off" maxlength="200"><datalist id="reply-suggestions"></datalist><button id="reply-add" type="submit">Add</button></form>',
+      '<ul class="rules" id="reply-rules" aria-label="Accounts whose replies are hidden"></ul><p class="hint">Applies immediately · Saved only on this device</p></details>',
       '<div class="status" id="status" role="status" aria-live="polite" hidden><div id="status-text"></div><div class="progress"><div class="bar" id="bar"></div></div><div id="status-error"></div><div class="batch-actions" id="batch-actions"></div></div>',
       '<p class="notice" id="notice" role="alert" hidden></p></div></section>',
     ].join('');
@@ -100,6 +104,10 @@
     $('clear').onclick = () => action('clear');
     $('filter-enabled').onchange = () => XMuteTimeline.setEnabled($('filter-enabled').checked).catch(error => setNotice(error.message));
     $('sync-muted').onclick = () => XMuteTimeline.sync().catch(error => setNotice(error.message));
+    $('reply-form').onsubmit = async event => {
+      event.preventDefault();
+      if (await action('replies:add', {handle: $('reply-handle').value})) { $('reply-handle').value = ''; $('reply-handle').focus(); }
+    };
     $('apply').onclick = async () => {
       // Include the last Shift-click even if its bag update is still in flight.
       await pickQueue;
@@ -127,7 +135,39 @@
     $('filter-enabled').disabled = !state;
     $('sync-muted').disabled = !state || !filter.enabled || filter.syncing || state.job?.status === 'running';
     $('filter-info').textContent = filter.error || (filter.syncing ? 'Syncing muted words from X…' :
-      filter.enabled ? filter.words + ' muted entries · ' + filter.hidden + ' posts hidden on this page' : 'Local filtering paused');
+      filter.enabled ? filter.words + ' muted entries' : 'Muted-word filtering paused');
+    $('filter-info').textContent += ' · ' + filter.hidden + ' posts hidden on this page';
+    $('reply-handle').disabled = !state; $('reply-add').disabled = !state;
+    const replyRules = state?.replyRules || [];
+    $('reply-count').textContent = replyRules.length ? '(' + replyRules.filter(rule => rule.enabled).length + ' active)' : '';
+    const replySignature = JSON.stringify([replyRules, !!state]);
+    if ($('reply-rules').dataset.signature !== replySignature) {
+      const focused = shadow.activeElement?.dataset.rule;
+      $('reply-rules').replaceChildren();
+      for (const rule of replyRules) {
+        const li = document.createElement('li'); li.className = 'rule';
+        const label = document.createElement('label'), input = document.createElement('input');
+        input.type = 'checkbox'; input.checked = rule.enabled; input.dataset.rule = rule.handle;
+        input.setAttribute('aria-label', 'Hide replies from @' + rule.handle);
+        input.onchange = async () => {
+          if (!await action('replies:toggle', {handle: rule.handle, enabled: input.checked})) input.checked = rule.enabled;
+        };
+        label.append(input, '@' + rule.handle);
+        const remove = document.createElement('button'); remove.textContent = '×';
+        remove.setAttribute('aria-label', 'Remove reply rule for @' + rule.handle);
+        remove.onclick = () => action('replies:remove', {handle: rule.handle});
+        li.append(label, remove); $('reply-rules').append(li);
+      }
+      $('reply-rules').dataset.signature = replySignature;
+      if (focused) [...$('reply-rules').querySelectorAll('input')].find(input => input.dataset.rule === focused)?.focus();
+    }
+    const handles = [...new Set([...document.querySelectorAll('article[data-testid="tweet"]')].map(X.postAuthor).filter(Boolean))].sort();
+    if ($('reply-suggestions').dataset.signature !== handles.join(',')) {
+      $('reply-suggestions').replaceChildren(...handles.map(handle => {
+        const option = document.createElement('option'); option.value = '@' + handle; return option;
+      }));
+      $('reply-suggestions').dataset.signature = handles.join(',');
+    }
     $('identity').textContent = state ? '@' + state.account : 'Sign in to X to start';
     $('count').textContent = String(bag.length);
     $('body').hidden = collapsed;

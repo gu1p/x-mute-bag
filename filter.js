@@ -6,6 +6,7 @@
   let account = null, data = null, syncing = false, loading = null, requestingSync = false;
   let timer = null, inspecting = false, imported = '', hidden = new Set(), hiddenCount = 0;
   let lastStatus = '', matcher = () => false, matcherUntil = 0;
+  let replyRules = [];
   const listeners = new Set();
   const style = document.createElement('style');
   style.textContent = '[data-xmb-filtered="true"]{display:none!important}';
@@ -19,7 +20,8 @@
     (term.validUntil == null || term.validUntil > Date.now());
   function status() {
     return {enabled: data?.enabled ?? true, words: data?.terms.filter(alive).length || 0,
-      hidden: hiddenCount, syncing, synced: !!data?.syncedAt, error: data?.error || ''};
+      hidden: hiddenCount, replies: replyRules.filter(rule => rule.enabled).length,
+      syncing, synced: !!data?.syncedAt, error: data?.error || ''};
   }
   function notify() {
     const current = JSON.stringify(status());
@@ -30,6 +32,7 @@
   function accept(value, expected) {
     if (X.account() !== expected) return;
     account = expected; data = value.filter; syncing = value.syncing;
+    replyRules = value.replyRules || [];
     matcher = C.muteMatcher(data.terms);
     const deadlines = data.terms.flatMap(term => [term.expiresAt, term.validUntil]).filter(time => time > Date.now());
     matcherUntil = deadlines.length ? Math.min(...deadlines) : Infinity;
@@ -66,11 +69,11 @@
   function scan() {
     const current = X.account();
     if (current !== account) {
-      restore(); data = null; account = null; syncing = false;
+      restore(); data = null; account = null; syncing = false; replyRules = [];
       if (current) load();
       notify(); return;
     }
-    if (!current || !data?.enabled || /^\/(settings|messages|compose|i\/chat)(\/|$)/.test(location.pathname)) {
+    if (!current || !data || /^\/(settings|messages|compose|i\/chat)(\/|$)/.test(location.pathname)) {
       restore(); notify(); return;
     }
     if (Date.now() >= matcherUntil) {
@@ -81,10 +84,12 @@
     }
     const next = new Set();
     hiddenCount = 0;
-    for (const article of document.querySelectorAll('article[data-testid="tweet"]')) {
-      if (article.parentElement.closest('article[data-testid="tweet"]') || article.closest('[role="dialog"],[contenteditable="true"]')) continue;
+    const articles = [...document.querySelectorAll('article[data-testid="tweet"]')].filter(article =>
+      !article.parentElement.closest('article[data-testid="tweet"]') && !article.closest('[role="dialog"],[contenteditable="true"]'));
+    const replies = X.replyTargets(articles, replyRules);
+    for (const article of articles) {
       // Evaluate each body separately: never join the end of a quote to its comment.
-      if (!X.postTexts(article).some(matcher)) continue;
+      if (!replies.has(article) && !(data.enabled && X.postTexts(article).some(matcher))) continue;
       const cell = article.closest('[data-testid="cellInnerDiv"]');
       const outerPosts = cell && [...cell.querySelectorAll('article[data-testid="tweet"]')].filter(post => !post.parentElement.closest('article[data-testid="tweet"]'));
       next.add(cell && outerPosts.length === 1 ? cell : article);
@@ -144,7 +149,7 @@
     schedule();
     if (location.pathname === X.LIST) inspectList();
   }).observe(document.documentElement, {childList: true, subtree: true, characterData: true,
-    attributes: true, attributeFilter: ['href', 'data-testid', 'alt']});
+    attributes: true, attributeFilter: ['href', 'data-testid', 'alt', 'class']});
   chrome.runtime.onMessage.addListener(message => {
     if (message.type === 'RUN') { inspectList(); schedule(); }
   });
@@ -152,8 +157,9 @@
     if (area !== 'local' || !changes.xMuteBag) return;
     const next = changes.xMuteBag.newValue, expected = X.account();
     const filter = expected && next?.accounts?.[expected]?.filter;
-    if (filter) accept({filter, syncing: next.filterSync?.account === expected && next.filterSync.status === 'running'}, expected);
-    else { account = null; data = null; restore(); schedule(); }
+    if (filter) accept({filter, replyRules: next.accounts[expected].replyRules,
+      syncing: next.filterSync?.account === expected && next.filterSync.status === 'running'}, expected);
+    else { account = null; data = null; replyRules = []; restore(); schedule(); }
   });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') { schedule(); load(); }

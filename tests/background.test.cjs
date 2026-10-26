@@ -180,3 +180,40 @@ test('a renewed native mute replaces an expired local deadline', async () => {
   assert.equal(term.expiresAt, null);
   assert.equal(C.muteMatcher([term])('renewed'), true);
 });
+test('account reply rules migrate existing stores, deduplicate, and survive browser restart', async () => {
+  const h = harness({local: {xMuteBag: {version: 1, accounts: {tester: {bag: [C.entry('kept')], options: {...C.DEFAULTS}}}, job: null}}, session: {}});
+  assert.deepEqual((await h.message('view')).replyRules, []);
+  await Promise.all(['@Alice', 'https://x.com/ALICE/', 'bob'].map(handle => h.message('replies:add', {handle})));
+  assert.deepEqual(h.store().accounts.tester.replyRules, [{handle: 'alice', enabled: true}, {handle: 'bob', enabled: true}]);
+  assert.equal(h.store().accounts.tester.bag[0].text, 'kept');
+  assert.equal(h.tabs.size, 1, 'local rules never open native settings');
+  await h.message('replies:toggle', {handle: 'alice', enabled: false});
+  h.backing.session = {};
+  const restarted = harness(h.backing);
+  assert.deepEqual((await restarted.message('filters:get')).replyRules, [{handle: 'alice', enabled: false}, {handle: 'bob', enabled: true}]);
+  assert.deepEqual((await restarted.message('view', {account: 'other'})).replyRules, []);
+  await restarted.message('replies:add', {handle: 'ALICE'});
+  await restarted.message('replies:remove', {handle: 'bob'});
+  assert.deepEqual((await restarted.message('view')).replyRules, [{handle: 'alice', enabled: true}]);
+});
+test('reply rules are independent of word filtering, native sync, and an active Apply batch', async () => {
+  const h = harness();
+  await h.message('add', {text: 'word'}); await h.message('apply');
+  await h.message('replies:add', {handle: '@alice'});
+  await h.message('filters:toggle', {enabled: false});
+  await h.message('filters:import', {words: []}, 1, 'https://x.com/settings/muted_keywords');
+  assert.deepEqual((await h.message('filters:get')).replyRules, [{handle: 'alice', enabled: true}]);
+  assert.equal(h.store().job.status, 'running');
+  await h.message('replies:remove', {handle: 'alice'});
+  assert.deepEqual((await h.message('view')).replyRules, []);
+});
+test('rejects invalid reply rule handles and updates without modifying saved rules', async () => {
+  const h = harness();
+  await h.message('replies:add', {handle: '__proto__'});
+  for (const handle of ['', null, '@@bad', 'a b', '<script>', 'https://evil.com/alice', 'https://x.com/alice/status/123', 'sixteen_charssssss']) {
+    await assert.rejects(h.message('replies:add', {handle}), /username/);
+  }
+  await assert.rejects(h.message('replies:toggle', {handle: '__proto__', enabled: 'false'}), /existing account/);
+  await assert.rejects(h.message('replies:toggle', {handle: 'missing', enabled: true}), /existing account/);
+  assert.deepEqual((await h.message('view')).replyRules, [{handle: '__proto__', enabled: true}]);
+});

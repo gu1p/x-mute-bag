@@ -139,7 +139,7 @@ async function until(probe, label, timeout = 15000) {
 
     model.words = [{text: 'existing'}];
     for (const word of ['existing', 'new one', 'new two']) await add(word);
-    await panel.locator('summary').click();
+    await panel.locator('#summary').click();
     await panel.getByLabel('Home timeline', {exact: true}).uncheck();
     await panel.getByLabel('Notification audience', {exact: true}).selectOption('unfollowed');
     await panel.getByLabel('Mute duration', {exact: true}).selectOption('7d');
@@ -236,6 +236,34 @@ async function until(probe, label, timeout = 15000) {
     });
     await until(async () => await page.locator('#persist-filter-test').getAttribute('data-xmb-filtered') === 'true', 'filter active without opening panel');
     console.log('PASS: native mute import, whole quoted-post hiding, boundaries, pause, recycled cells, unmute and persistence');
+    await toggle();
+    const addReplyPosts = () => page.evaluate(() => {
+      const cell = (id, author, content) => {
+        const element = document.createElement('div'); element.dataset.testid = 'cellInnerDiv'; element.id = id;
+        element.innerHTML = '<article data-testid="tweet"><div data-testid="User-Name"><a href="/' + author + '">@' + author + '</a></div>' + content + '</article>';
+        document.querySelector('main').append(element);
+      };
+      cell('account-original', 'Alice', '<div data-testid="tweetText">An original post</div>');
+      cell('account-reply', 'Alice', '<div dir="ltr">Replying to <span>@bob</span></div><div data-testid="tweetText">A reply to another account</div>');
+      cell('account-self', 'Alice', '<div dir="ltr">Replying to <span>@Alice</span></div><div data-testid="tweetText">My thread continues</div>');
+    });
+    await addReplyPosts();
+    await panel.getByRole('textbox', {name: 'Hide replies from account', exact: true}).fill('@Alice');
+    await panel.locator('#reply-add').click();
+    await until(async () => !await page.locator('#account-reply').isVisible(), 'account reply hidden');
+    assert.equal(await page.locator('#account-original').isVisible(), true);
+    assert.equal(await page.locator('#account-self').isVisible(), true);
+    await panel.getByLabel('Hide replies from @alice', {exact: true}).uncheck();
+    await until(async () => await page.locator('#account-reply').isVisible(), 'paused account rule');
+    await panel.getByLabel('Hide replies from @alice', {exact: true}).check();
+    await page.reload();
+    await page.locator('[data-testid=tweetText]').first().waitFor();
+    await addReplyPosts();
+    await until(async () => !await page.locator('#account-reply').isVisible(), 'account rule persists without panel');
+    await toggle();
+    await panel.getByRole('button', {name: 'Remove reply rule for @alice', exact: true}).click();
+    await until(async () => await page.locator('#account-reply').isVisible(), 'removed account rule');
+    console.log('PASS: local account reply rules, originals, self-threads, pause, reload and removal');
     fs.mkdirSync(path.join(root, 'artifacts'), {recursive: true});
     await page.screenshot({path: path.join(root, 'artifacts', 'browser-fixture.png')});
     assert.deepEqual(errors, []);

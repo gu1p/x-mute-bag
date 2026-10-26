@@ -144,6 +144,90 @@ async function mountHarness(sources, fixture) {
   function pass(name) { results.push(name); console.log('PASS: ' + name); }
   globalThis.XMBTest = {
     model, store, results, errors, tabs, toggle, add, pick, click, command,
+    async replies() {
+      await until(() => store()?.accounts.tester?.filter.syncedAt > 0, 'initial import');
+      await toggle();
+      const make = (id, author, {above = false, below = false, label = '', text = 'An ordinary post', extra = ''} = {}) => {
+        const cell = win().document.createElement('div'); cell.dataset.testid = 'cellInnerDiv'; cell.id = 'reply-test-' + id;
+        // Same avatar columns and connector layout observed on the live X feed.
+        cell.innerHTML = '<article data-testid="tweet"><div>' +
+          (above ? '<div><div><div><div style="width:2px;position:absolute"></div></div><div></div></div></div>' : '') +
+          '<div><div><div data-testid="Tweet-User-Avatar"></div>' + (below ? '<div style="width:2px;flex-grow:1"></div>' : '') + '</div><div>' +
+          '<div data-testid="User-Name"><a href="/' + author + '">@' + author + '</a><a href="/' + author + '/status/123"><time>Now</time></a></div>' +
+          (label ? '<div dir="ltr">Replying to <span>' + label + '</span></div>' : '') +
+          '<div data-testid="tweetText">' + text + '</div>' + extra + '</div></div></div></article>';
+        win().document.querySelector('main').append(cell); return cell;
+      };
+      const hidden = node => node.hasAttribute('data-xmb-filtered');
+      const parent = make('parent', 'bob', {below: true});
+      const reply = make('answer', 'Alice', {above: true});
+      const original = make('original', 'alice');
+      const selfParent = make('self-parent', 'alice', {below: true});
+      const selfReply = make('self-reply', 'alice', {above: true});
+      const labeled = make('labeled', 'alice', {label: '@bob'});
+      const selfLabeled = make('self-labeled', 'alice', {label: '@alice'});
+      const quote = make('quote', 'alice', {extra: '<div role="link"><div data-testid="User-Name"><a href="/alice">@alice</a></div><div dir="ltr">Replying to <span>@bob</span></div><div data-testid="tweetText">Quoted reply</div></div>'});
+      const written = make('written', 'alice', {text: '<div dir="ltr">Replying to <span>@bob</span> is something I often do</div>'});
+      const orphan = make('orphan', 'alice', {above: true});
+      const chainParent = make('chain-parent', 'bob', {below: true});
+      const chainReply = make('chain-reply', 'alice', {above: true, below: true});
+      const chainLeaf = make('chain-leaf', 'carol', {above: true});
+      const mismatchParent = make('mismatch-parent', 'dave', {below: true});
+      const mismatchReply = make('mismatch-reply', 'alice', {above: true, label: '@bob'});
+      el('reply-handle').value = 'https://x.com/ALICE';
+      el('reply-form').dispatchEvent(new (win().Event)('submit', {cancelable: true}));
+      await until(() => hidden(parent) && hidden(reply) && hidden(labeled) && hidden(chainReply) && hidden(mismatchReply), 'replies and attached context hidden');
+      assert(win().getComputedStyle(parent).display === 'none' && reply.isConnected, 'hide complete cells without deleting DOM');
+      for (const node of [original, selfParent, selfReply, selfLabeled, quote, written, orphan, chainParent, chainLeaf, mismatchParent]) assert(!hidden(node), 'preserve ' + node.id);
+      assert(store().accounts.tester.replyRules.length === 1 && !model.saves.length, 'local rule saved without native mutations');
+      await sleep(200);
+      assert(hidden(parent) && hidden(reply), 'connectors still recognized while hidden');
+      const ruleToggle = () => panel().querySelector('input[aria-label="Hide replies from @alice"]');
+      ruleToggle().click(); await until(() => !hidden(parent) && !hidden(labeled), 'pause restores context and replies');
+      ruleToggle().click(); await until(() => hidden(parent), 'resume rule');
+      // Changing the author in a recycled node must restore both cells.
+      reply.querySelector('[data-testid="User-Name"] a').setAttribute('href', '/bob');
+      await until(() => !hidden(parent) && !hidden(reply), 'recycled author becomes self-thread');
+      reply.querySelector('[data-testid="User-Name"] a').setAttribute('href', '/alice');
+      await until(() => hidden(parent), 'updated author rematched');
+      const lateParent = make('late-parent', 'bob', {below: true});
+      await sleep(80); const lateReply = make('late-reply', 'alice', {above: true});
+      await until(() => hidden(lateParent) && hidden(lateReply), 'newly loaded reply');
+      await win().XMuteTimeline.setEnabled(false);
+      assert(hidden(parent), 'reply rule independent of word toggle');
+      model.account = 'other';
+      win().document.querySelector('[data-testid=AppTabBar_Profile_Link]').href = '/other';
+      await until(() => !hidden(parent), 'account switch restores replies');
+      model.account = 'tester';
+      win().document.querySelector('[data-testid=AppTabBar_Profile_Link]').href = '/tester';
+      await until(() => hidden(parent), 'account-specific rules restored');
+      tab().url = 'https://x.com/alice/status/123';
+      win().document.querySelector('main').append(win().document.createComment('route changed'));
+      await until(() => !hidden(parent) && !hidden(labeled), 'direct conversation readable');
+      tab().url = 'https://x.com/home';
+      win().document.querySelector('main').append(win().document.createComment('route changed'));
+      await until(() => hidden(parent), 'back to feed');
+      // Native cache updates, removals, and expiry must not erase local account rules.
+      const state = clone(store());
+      state.accounts.tester.filter.enabled = true;
+      state.accounts.tester.filter.terms = [{text: 'An ordinary post', expiresAt: null, validUntil: Date.now() + 150}];
+      await storage.local.set({xMuteBag: state});
+      await until(() => hidden(original), 'word and author filters coexist');
+      await sleep(200);
+      win().document.querySelector('main').append(win().document.createComment('cache expired'));
+      await until(() => !hidden(original), 'word expiry');
+      assert(hidden(parent) && hidden(labeled), 'account rule does not expire');
+      await mount(tab());
+      const reloaded = make('reload', 'alice', {label: '@bob'});
+      await until(() => hidden(reloaded), 'rule survives reload with panel closed');
+      await toggle();
+      panel().querySelector('button[aria-label="Remove reply rule for @alice"]').click();
+      await until(() => !hidden(reloaded) && !store().accounts.tester.replyRules.length, 'remove rule restores post');
+      reloaded.remove(); await click('close');
+      assert(!errors.length, 'clean reply filter execution: ' + errors.join(','));
+      pass('Local account rules, connected conversations, original posts, self-threads, quotes, recycling, independent word filter, accounts, routes and reload');
+      return results;
+    },
     async filtering() {
       await until(() => store()?.accounts.tester?.filter.syncedAt > 0, 'initial muted-word import');
       model.words = [{text: 'Silenced Person'}, {text: 'spoiler'}, {text: '🇧🇷'}];
@@ -153,7 +237,7 @@ async function mountHarness(sources, fixture) {
         await until(() => store().accounts.tester.filter.syncedAt > previous && store().filterSync?.status !== 'running', 'native list sync');
       };
       await sync();
-      assert(!panel(), 'filter runs with panel closed');
+      assert(!panel() || win().document.querySelector('#x-mute-bag').hidden, 'filter runs with panel closed');
       const cell = (id, html) => {
         const element = win().document.createElement('div'); element.dataset.testid = 'cellInnerDiv'; element.id = id;
         element.innerHTML = '<article data-testid="tweet">' + html + '</article>';
@@ -352,5 +436,5 @@ async function mountHarness(sources, fixture) {
       return results;
     },
   };
-  return {ready: true, tests: ['filtering', 'selection', 'phrases', 'apply', 'failures', 'stopAndAccount']};
+  return {ready: true, tests: ['replies', 'filtering', 'selection', 'phrases', 'apply', 'failures', 'stopAndAccount']};
 }

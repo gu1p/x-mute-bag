@@ -109,5 +109,58 @@
       return read(block);
     });
   }
-  globalThis.XMuteX = {LIST, ADD, account, list, mutedSnapshot, postTexts, form, setKeyword, setOptions, ready, error};
+  function postAuthor(article) {
+    const header = article.querySelector('[data-testid="User-Name"]');
+    const href = header?.querySelector('a[href]')?.getAttribute('href');
+    return href?.match(/^\/([a-zA-Z0-9_]{1,15})\/?$/)?.[1].toLowerCase() || null;
+  }
+  function replyInfo(article) {
+    const author = postAuthor(article);
+    const own = node => node.closest('article[data-testid="tweet"]') === article &&
+      !node.closest('[data-testid="tweetText"]') && !article.contains(node.closest('[role="link"]'));
+    // Only X's metadata, never text written by the author or inside a quoted card.
+    const label = [...article.querySelectorAll('div[dir]')].find(node => own(node) &&
+      [...node.childNodes].some(child => child.nodeType === Node.TEXT_NODE && /^Replying to\s/.test(child.textContent.trimStart())));
+    const recipients = [...(label?.textContent.matchAll(/@([a-zA-Z0-9_]{1,15})/g) || [])].map(match => match[1].toLowerCase());
+    const other = recipients.some(handle => handle !== author) || !!label && /\bothers\b/.test(label.textContent);
+    // Home often omits the label and instead draws a 2px line above/below the
+    // avatar. Check its position AND layout, not generated CSS class names.
+    const avatar = article.querySelector('[data-testid="Tweet-User-Avatar"]');
+    const column = avatar && own(avatar) ? avatar.parentElement : null;
+    const line = node => node?.matches('div:empty') && getComputedStyle(node).width === '2px';
+    const below = column && [...column.children].some(node => node !== avatar && line(node) && getComputedStyle(node).flexGrow === '1');
+    const top = column?.parentElement.previousElementSibling;
+    const above = top && [...top.querySelectorAll('div:empty')].some(node => line(node) && getComputedStyle(node).position === 'absolute');
+    return {author, labeled: !!label, other, recipients, above: !!above, below: !!below};
+  }
+  function replyTargets(articles, rules) {
+    const blocked = new Set(rules.filter(rule => rule.enabled).map(rule => rule.handle));
+    const targets = new Set();
+    // Directly opened conversations stay readable; these rules apply to feeds.
+    if (!blocked.size || /^\/[^/]+\/status\/\d+(\/|$)/.test(location.pathname)) return targets;
+    const posts = articles.map(article => ({article, ...replyInfo(article), cell: article.closest('[data-testid="cellInnerDiv"]')}));
+    const cells = new Map();
+    for (const post of posts) {
+      if (post.cell) cells.set(post.cell, cells.has(post.cell) ? null : post);
+    }
+    for (const post of posts) {
+      const parent = cells.get(post.cell?.previousElementSibling);
+      if (parent?.below && post.above && parent.author && post.author && cells.get(post.cell) === post) {
+        // When explicit recipients disagree, adjacent cells are not proof of a connection.
+        if (!post.labeled || post.recipients.includes(parent.author)) {
+          post.parent = parent; parent.child = post;
+        }
+      }
+      const other = post.labeled ? post.other : post.parent && post.parent.author !== post.author;
+      if (blocked.has(post.author) && other) targets.add(post.article);
+    }
+    // Remove attached context only when the filtered reply ends the conversation
+    // item. Keep context that is still needed by a visible downstream reply.
+    for (const post of posts) {
+      if (!targets.has(post.article) || post.child || post.below) continue;
+      for (let parent = post.parent; parent; parent = parent.parent) targets.add(parent.article);
+    }
+    return targets;
+  }
+  globalThis.XMuteX = {LIST, ADD, account, list, mutedSnapshot, postTexts, postAuthor, replyInfo, replyTargets, form, setKeyword, setOptions, ready, error};
 })();
