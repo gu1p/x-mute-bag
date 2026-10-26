@@ -65,6 +65,7 @@
       'input[type=text],select{min-width:0;background:#0e141c;border:1px solid #465368;border-radius:8px;color:inherit;padding:8px 9px} .entry input{width:100%}.entry button{border:0;padding:7px}.entry input:disabled{opacity:.7}',
       '.add{display:flex;gap:7px;margin-top:10px}.add input{flex:1;width:100%}.add button{padding:7px 12px}',
       '.tools{display:flex;justify-content:space-between;align-items:center;margin:10px 0;color:#a0adbe;font-size:12px}.tools button{border:0;padding:2px 0;font-size:12px;text-decoration:underline}',
+      '.filter{border-top:1px solid #344052;margin-top:12px;padding-top:12px;font-size:12px}.filter label{display:flex;align-items:center;gap:6px}.filter button{font-size:12px;margin-top:8px}.filter p{margin:7px 0;color:#a0adbe}',
       'details{border-top:1px solid #344052;padding-top:11px;margin-top:12px}summary{cursor:pointer;font-size:12px;color:#a0adbe}.options{display:grid;gap:9px;padding-top:12px;font-size:12px}.options label{display:flex;align-items:center;gap:7px}.options select{margin-left:auto;max-width:195px;font-size:12px}input[type=checkbox]{accent-color:#8fe4c0}',
       '.apply{margin-top:14px;width:100%;background:#b8f4da;color:#163d2f;border-color:#b8f4da;font-weight:700;padding:10px}.apply:hover{background:#9ee6c8}',
       '.status{margin:12px 0 0;padding:10px 12px;background:#ffffff08;border-radius:10px;font-size:12px;overflow-wrap:anywhere}.progress{height:4px;background:#344052;border-radius:3px;margin:9px 0}.bar{height:100%;background:#8fe4c0;border-radius:3px;transition:width .2s}',
@@ -87,6 +88,7 @@
       '<label>From<select id="audience" aria-label="Notification audience"><option value="anyone">Anyone</option><option value="unfollowed">People you don’t follow</option></select></label>',
       '<label>Duration<select id="duration" aria-label="Mute duration"><option value="forever">Forever</option><option value="24h">24 hours</option><option value="7d">7 days</option><option value="30d">30 days</option></select></label>',
       '</div></details><button class="apply" id="apply">Apply muted words</button>',
+      '<div class="filter"><label><input id="filter-enabled" type="checkbox" checked>Hide muted posts, including quotes</label><p id="filter-info" role="status"></p><button id="sync-muted">Sync muted words</button></div>',
       '<div class="status" id="status" role="status" aria-live="polite" hidden><div id="status-text"></div><div class="progress"><div class="bar" id="bar"></div></div><div id="status-error"></div><div class="batch-actions" id="batch-actions"></div></div>',
       '<p class="notice" id="notice" role="alert" hidden></p></div></section>',
     ].join('');
@@ -96,6 +98,8 @@
     $('collapse').onclick = () => { collapsed = !collapsed; render(); };
     $('pick').onclick = () => setPicking(!active);
     $('clear').onclick = () => action('clear');
+    $('filter-enabled').onchange = () => XMuteTimeline.setEnabled($('filter-enabled').checked).catch(error => setNotice(error.message));
+    $('sync-muted').onclick = () => XMuteTimeline.sync().catch(error => setNotice(error.message));
     $('apply').onclick = async () => {
       // Include the last Shift-click even if its bag update is still in flight.
       await pickQueue;
@@ -118,6 +122,12 @@
     const $ = id => shadow.getElementById(id);
     const bag = state?.bag || [];
     const disabled = locked() || !state;
+    const filter = XMuteTimeline.status();
+    $('filter-enabled').checked = filter.enabled;
+    $('filter-enabled').disabled = !state;
+    $('sync-muted').disabled = !state || !filter.enabled || filter.syncing || state.job?.status === 'running';
+    $('filter-info').textContent = filter.error || (filter.syncing ? 'Syncing muted words from X…' :
+      filter.enabled ? filter.words + ' muted entries · ' + filter.hidden + ' posts hidden on this page' : 'Local filtering paused');
     $('identity').textContent = state ? '@' + state.account : 'Sign in to X to start';
     $('count').textContent = String(bag.length);
     $('body').hidden = collapsed;
@@ -385,6 +395,8 @@
           // Allow the native list to settle after its loading indicator disappears.
           await new Promise(resolve => setTimeout(resolve, 450));
           const words = await waitFor(() => X.list(), job, 'reading muted words');
+          const snapshot = X.mutedSnapshot();
+          if (snapshot) await request('filters:import', {account: job.account, words: snapshot});
           if (words.has(item.key)) job = await send('runner:found');
           else if (job.phase === 'check') job = await send('runner:missing');
           else {
@@ -436,5 +448,6 @@
     if (next && next.status !== 'running') cancelledJob = next.id;
     if (visible) refresh().catch(error => setNotice(error.message));
   });
+  XMuteTimeline.subscribe(() => { if (visible) render(); });
   runBatch();
 })();

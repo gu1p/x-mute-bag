@@ -28,7 +28,7 @@ function harness(backing = {local: {}, session: {}}) {
     action: {onClicked: event('clicked'), setBadgeText: async () => {}, setTitle: async () => {}},
     scripting: {executeScript: async () => {}},
   };
-  const context = vm.createContext({chrome, XMuteCore: C, importScripts() {}, console, URL, Date});
+  const context = vm.createContext({chrome, XMuteCore: C, importScripts() {}, console, URL, Date, crypto});
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../background.js'), 'utf8'), context);
   async function message(type, fields = {}, tabId = 1, origin = 'https://x.com/home') {
     const result = await new Promise(resolve => listeners.message(
@@ -124,4 +124,59 @@ test('rejects foreign origins, stale entries, and concurrent batches across acco
   await h.message('add', {account: 'other', text: 'another'});
   await assert.rejects(h.message('apply', {account: 'other'}), /existing batch/);
   await assert.rejects(h.runner('runner:missing', {itemId: 'old'}), /advanced/);
+});
+test('sync imports existing native mutes, preserves the bag, and removes unmuted terms', async () => {
+  const h = harness();
+  await h.message('add', {text: 'unsaved'});
+  await h.message('filters:sync');
+  const sync = h.store().filterSync;
+  assert.equal(h.tabs.get(sync.tabId).url, 'https://x.com/settings/muted_keywords');
+  assert.equal(h.tabs.get(1).url, 'https://x.com/home');
+  await assert.rejects(h.message('filters:import', {words: [{text: 'bad', forever: true}]}), /settings list/);
+  await assert.rejects(h.message('filters:import', {syncId: 'wrong', words: []}, sync.tabId, 'https://x.com/settings/muted_keywords'), /no longer/);
+  await h.message('filters:import', {syncId: sync.id, words: [{text: 'John Smith', forever: true}, {text: 'cats', forever: true}]}, sync.tabId, 'https://x.com/settings/muted_keywords');
+  assert.equal(h.tabs.has(sync.tabId), false);
+  assert.deepEqual(h.store().accounts.tester.bag.map(i => i.text), ['unsaved']);
+  assert.deepEqual(h.store().accounts.tester.filter.terms.map(i => i.text), ['John Smith', 'cats']);
+  await h.message('filters:import', {words: [{text: 'cats', forever: true}]}, 1, 'https://x.com/settings/muted_keywords');
+  assert.deepEqual(h.store().accounts.tester.filter.terms.map(i => i.text), ['cats']);
+  await h.message('filters:import', {words: []}, 1, 'https://x.com/settings/muted_keywords');
+  assert.deepEqual(h.store().accounts.tester.filter.terms, []);
+});
+test('sync is account-scoped, throttled, and never consumes another account’s list', async () => {
+  const h = harness();
+  await h.message('filters:sync');
+  const sync = h.store().filterSync;
+  await h.message('filters:sync');
+  assert.equal(h.store().filterSync.id, sync.id);
+  await assert.rejects(h.message('filters:import', {account: 'other', syncId: sync.id, words: []}, sync.tabId, 'https://x.com/settings/muted_keywords'), /no longer/);
+  await h.message('filters:failed', {syncId: sync.id, error: 'login expired'}, sync.tabId, 'https://x.com/settings/muted_keywords');
+  assert.equal(h.store().filterSync.status, 'failed');
+  await h.message('filters:sync');
+  assert.equal(h.store().filterSync.id, sync.id);
+  await h.message('filters:toggle', {enabled: false});
+  await h.message('filters:sync', {force: true});
+  assert.equal(h.store().filterSync.id, sync.id);
+});
+test('confirmed Apply entries persist after the bag empties and expire on schedule', async () => {
+  const h = harness();
+  await h.message('add', {text: 'John Smith'});
+  await h.message('options', {options: {...C.DEFAULTS, duration: '24h'}});
+  await h.message('apply');
+  await h.runner('runner:missing'); await h.runner('runner:submit'); await h.runner('runner:found');
+  const data = h.store().accounts.tester;
+  assert.equal(data.bag.length, 0);
+  assert.equal(data.filter.terms[0].text, 'John Smith');
+  assert.ok(data.filter.terms[0].expiresAt > Date.now() + 86300000);
+  assert.ok(data.filter.terms[0].validUntil <= Date.now() + C.FILTER_CACHE_MS);
+  assert.equal((await h.message('filters:get', {account: 'other'})).filter.terms.length, 0);
+});
+test('a renewed native mute replaces an expired local deadline', async () => {
+  const h = harness();
+  await h.message('filters:import', {words: [{text: 'renewed', forever: false}]}, 1, 'https://x.com/settings/muted_keywords');
+  h.backing.local.xMuteBag.accounts.tester.filter.terms[0].expiresAt = Date.now() - 1;
+  await h.message('filters:import', {words: [{text: 'renewed', forever: false}]}, 1, 'https://x.com/settings/muted_keywords');
+  const term = h.store().accounts.tester.filter.terms[0];
+  assert.equal(term.expiresAt, null);
+  assert.equal(C.muteMatcher([term])('renewed'), true);
 });

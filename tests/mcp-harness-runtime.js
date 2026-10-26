@@ -19,7 +19,10 @@ async function mountHarness(sources, fixture) {
     }
     throw Error('Timeout: ' + label + ' / ' + JSON.stringify(data.local.xMuteBag?.job));
   }
-  const event = (object, key) => ({addListener: listener => { object[key] = listener; }});
+  const event = (object, key) => ({addListener: listener => {
+    const previous = object[key];
+    object[key] = previous ? (...args) => { previous(...args); listener(...args); } : listener;
+  }});
   const storage = {
     local: {
       get: async key => ({[key]: clone(data.local[key])}),
@@ -99,7 +102,7 @@ async function mountHarness(sources, fixture) {
     };
     const script = win.document.querySelector('script').textContent;
     win.Function('fetch', 'location', script)(fetch, location);
-    win.Function('chrome', 'location', sources['core.js'] + '\n' + sources['x-adapter.js'] + '\n' + sources['content.js'])(chrome, location);
+    win.Function('chrome', 'location', sources['core.js'] + '\n' + sources['x-adapter.js'] + '\n' + sources['filter.js'] + '\n' + sources['content.js'])(chrome, location);
     await sleep(30);
     workerEvents.updated?.(tab.id, {status: 'complete'});
   }
@@ -141,6 +144,78 @@ async function mountHarness(sources, fixture) {
   function pass(name) { results.push(name); console.log('PASS: ' + name); }
   globalThis.XMBTest = {
     model, store, results, errors, tabs, toggle, add, pick, click, command,
+    async filtering() {
+      await until(() => store()?.accounts.tester?.filter.syncedAt > 0, 'initial muted-word import');
+      model.words = [{text: 'Silenced Person'}, {text: 'spoiler'}, {text: '🇧🇷'}];
+      const sync = async () => {
+        const previous = store().accounts.tester.filter.syncedAt;
+        await win().XMuteTimeline.sync();
+        await until(() => store().accounts.tester.filter.syncedAt > previous && store().filterSync?.status !== 'running', 'native list sync');
+      };
+      await sync();
+      assert(!panel(), 'filter runs with panel closed');
+      const cell = (id, html) => {
+        const element = win().document.createElement('div'); element.dataset.testid = 'cellInnerDiv'; element.id = id;
+        element.innerHTML = '<article data-testid="tweet">' + html + '</article>';
+        win().document.querySelector('main').append(element);
+        return element;
+      };
+      const body = text => '<div data-testid="tweetText">' + text + '</div>';
+      const quoted = cell('filter-quote', body('A neutral comment') + '<div role="link">' + body('<span>Silenced</span> <b>Person</b> was quoted') + '</div>');
+      const own = cell('filter-own', body('A SPOILER here'));
+      const safe = cell('filter-safe', body('spoilerish and Silenced Personson'));
+      const split = cell('filter-split', body('Silenced') + '<div role="link">' + body('Person') + '</div>');
+      const emoji = cell('filter-emoji', body('Flag <img alt="🇧🇷">'));
+      const nested = cell('filter-nested', body('Neutral') + '<article data-testid="tweet">' + body('spoiler') + '</article>');
+      const metadata = cell('filter-metadata', '<div data-testid="User-Name">spoiler</div>' + body('Body stays clear'));
+      await until(() => quoted.hasAttribute('data-xmb-filtered') && own.hasAttribute('data-xmb-filtered') &&
+        emoji.hasAttribute('data-xmb-filtered') && nested.hasAttribute('data-xmb-filtered'), 'outer posts hidden');
+      assert(win().getComputedStyle(quoted).display === 'none' && quoted.isConnected, 'entire quote cell hidden without deleting React DOM');
+      assert(!safe.hasAttribute('data-xmb-filtered') && !split.hasAttribute('data-xmb-filtered') && !metadata.hasAttribute('data-xmb-filtered'), 'boundaries and separate bodies avoid false positives');
+      quoted.querySelectorAll('[data-testid=tweetText]')[1].textContent = 'Now a different clean quote';
+      await until(() => !quoted.hasAttribute('data-xmb-filtered'), 'recycled cell restored');
+      const late = cell('filter-late', body('Initially clean'));
+      await sleep(100);
+      late.querySelector('article').insertAdjacentHTML('beforeend', '<div role="link">' + body('A spoiler arrives later') + '</div>');
+      await until(() => late.hasAttribute('data-xmb-filtered'), 'late quoted content');
+      await win().XMuteTimeline.setEnabled(false);
+      await until(() => !own.hasAttribute('data-xmb-filtered') && !late.hasAttribute('data-xmb-filtered'), 'toggle restores all posts');
+      await win().XMuteTimeline.setEnabled(true);
+      await until(() => own.hasAttribute('data-xmb-filtered'), 'toggle enables filter');
+      const terms = model.words;
+      model.account = 'other'; model.words = [];
+      win().document.querySelector('[data-testid=AppTabBar_Profile_Link]').href = '/other';
+      await until(() => !own.hasAttribute('data-xmb-filtered') && store().accounts.other?.filter.syncedAt > 0, 'account switch isolation');
+      model.account = 'tester'; model.words = terms;
+      win().document.querySelector('[data-testid=AppTabBar_Profile_Link]').href = '/tester';
+      await until(() => own.hasAttribute('data-xmb-filtered'), 'original account filter restored');
+      await mount(tab());
+      const persisted = cell('filter-persisted', body('Ordinary text') + '<div role="link">' + body('Silenced Person') + '</div>');
+      await until(() => persisted.hasAttribute('data-xmb-filtered'), 'persistent filter after reload without toolbar click');
+      model.words = [{text: 'spoiler'}];
+      await sync();
+      await until(() => !persisted.hasAttribute('data-xmb-filtered'), 'unmuted native term restored');
+      await toggle(); await add('unsaved phrase');
+      const unsaved = cell('filter-unsaved', body('unsaved phrase'));
+      await sleep(100);
+      assert(!unsaved.hasAttribute('data-xmb-filtered'), 'pending bag entries are not active mutes');
+      const expiring = cell('filter-expiring', body('spoiler'));
+      await until(() => expiring.hasAttribute('data-xmb-filtered'), 'active cached word');
+      const state = clone(store());
+      state.accounts.tester.filter.terms[0].validUntil = Date.now() + 80;
+      await storage.local.set({xMuteBag: state});
+      await sleep(120);
+      win().document.querySelector('main').append(win().document.createComment('time advanced'));
+      await until(() => !expiring.hasAttribute('data-xmb-filtered'), 'stale cache no longer hides posts');
+      await click('clear');
+      model.words = [];
+      await sync();
+      for (const element of win().document.querySelectorAll('[id^="filter-"]')) element.remove();
+      await click('close');
+      assert(!errors.length, 'clean filtering execution: ' + errors.join(','));
+      pass('Automatic mute import, quote/outer-post filtering, boundaries, new and recycled posts, pause, accounts, reload, unmute and expiry');
+      return results;
+    },
     async selection() {
       await toggle();
       await pick('Café'); await pick('Café'); await pick('#Topic'); await pick('multi');
@@ -277,5 +352,5 @@ async function mountHarness(sources, fixture) {
       return results;
     },
   };
-  return {ready: true, tests: ['selection', 'phrases', 'apply', 'failures', 'stopAndAccount']};
+  return {ready: true, tests: ['filtering', 'selection', 'phrases', 'apply', 'failures', 'stopAndAccount']};
 }

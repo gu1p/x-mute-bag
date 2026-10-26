@@ -2,6 +2,8 @@
 (() => {
   'use strict';
   const DEFAULTS = Object.freeze({home: true, notifications: true, audience: 'anyone', duration: 'forever'});
+  const FILTER_SYNC_MS = 10 * 60 * 1000;
+  const FILTER_CACHE_MS = 15 * 60 * 1000;
   const clean = text => String(text ?? '').normalize('NFC').trim().replace(/\s+/gu, ' ');
   const key = text => clean(text).toLowerCase();
   const accountKey = value => {
@@ -79,7 +81,26 @@
     for (const item of job?.items || []) if (item.status in count) count[item.status]++;
     return count;
   }
-  const api = {DEFAULTS, clean, key, accountKey, entry, options, add, edit, pick, tokens, createJob, finishItem, counts};
+  function muteDeadline(duration, now = Date.now()) {
+    const hours = {'24h': 24, '7d': 168, '30d': 720}[duration];
+    return hours ? now + hours * 3600000 : null;
+  }
+  function muteMatcher(terms, now = Date.now()) {
+    const patterns = terms.filter(term => (term.expiresAt == null || term.expiresAt > now) &&
+      (term.validUntil == null || term.validUntil > now)).map(term => {
+      const word = key(term.text);
+      if (!word) return null;
+      const escaped = word.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
+      const hashtag = /^[\p{L}\p{M}\p{N}_]/u.test(word) ? '#?' : '';
+      // Word/handle boundaries prevent "cat" matching "education" or "@cats".
+      return new RegExp('(?<![\\p{L}\\p{M}\\p{N}_@#])' + hashtag + escaped + '(?![\\p{L}\\p{M}\\p{N}_])', 'u');
+    }).filter(Boolean);
+    return text => {
+      const normalized = key(text);
+      return patterns.some(pattern => pattern.test(normalized));
+    };
+  }
+  const api = {DEFAULTS, FILTER_SYNC_MS, FILTER_CACHE_MS, clean, key, accountKey, entry, options, add, edit, pick, tokens, createJob, finishItem, counts, muteDeadline, muteMatcher};
   globalThis.XMuteCore = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

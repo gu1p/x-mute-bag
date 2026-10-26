@@ -71,3 +71,22 @@ test('account identities are handles, not arbitrary storage keys', () => {
   assert.equal(C.accountKey('My_Account'), 'my_account');
   for (const value of ['../x', '', 'name with spaces', null]) assert.throws(() => C.accountKey(value));
 });
+test('local matching respects Unicode words, accents, hashtags and literal phrases', () => {
+  const matcher = C.muteMatcher(['cat', 'John Smith', 'ação', '#topic', '@some_user', 'C++', '🇧🇷'].map(text => ({text})));
+  for (const text of ['A CAT!', '#cat', 'JOHN\n  SMITH', 'ação!', 'ação!', '#topic', '@some_user said', 'C++ is here', '🇧🇷']) {
+    assert.equal(matcher(text), true, text);
+  }
+  for (const text of ['education', 'cats', 'catapult', '@cat', 'John Smithson', 'John and Smith', 'acao', 'topic', '#topical', '@some_user2', 'C--']) {
+    assert.equal(matcher(text), false, text);
+  }
+  assert.equal(C.muteMatcher([{text: 'a.b (test)'}])('aXb test'), false);
+  assert.equal(C.muteMatcher([{text: 'a.b (test)'}])('a.b (test)!'), true);
+});
+test('expired or stale muted rules stop matching', () => {
+  const now = 100000;
+  assert.equal(C.muteMatcher([{text: 'expired', expiresAt: now}], now)('expired'), false);
+  assert.equal(C.muteMatcher([{text: 'stale', validUntil: now - 1}], now)('stale'), false);
+  assert.equal(C.muteMatcher([{text: 'active', validUntil: now + 1, expiresAt: now + 10}], now)('active'), true);
+  assert.equal(C.muteDeadline('24h', now), now + 86400000);
+  assert.equal(C.muteDeadline('forever', now), null);
+});

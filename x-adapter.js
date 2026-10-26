@@ -14,18 +14,24 @@
     return heading?.closest('[role="region"]') || null;
   }
   function list() {
+    const snapshot = mutedSnapshot();
+    return snapshot ? new Set(snapshot.map(word => word.key)) : null;
+  }
+  function mutedSnapshot() {
     if (location.pathname !== LIST) return null;
     const region = details();
     if (!region || !region.querySelector('a[href="/settings/add_muted_keyword"]') ||
         region.querySelector('[role="progressbar"]')) return null;
+    if ([...region.querySelectorAll('[role="alert"],[data-testid="error-detail"]')].some(node => node.textContent.trim()) ||
+        [...region.querySelectorAll('button')].some(button => /^(Retry|Reload|Try again)$/.test(button.textContent.trim()))) return null;
     const words = [];
     for (const button of region.querySelectorAll('button[aria-label="Unmute"]')) {
       const row = button.closest('[role="link"]');
       const word = row?.firstElementChild?.firstElementChild?.textContent;
       if (!word?.trim()) throw new Error('X’s muted-word list has changed. Open the settings tab to review it.');
-      words.push(C.key(word));
+      words.push({text: C.clean(word), key: C.key(word), forever: row.firstElementChild.children[1]?.textContent.trim() === 'Forever'});
     }
-    return new Set(words);
+    return words;
   }
   function form() {
     if (location.pathname !== ADD) return null;
@@ -91,5 +97,17 @@
     if (toast && /error|try again|limit|already|unable|failed|too long/i.test(toast.textContent)) candidates.push(toast);
     return candidates.map(e => e.textContent.trim()).find(Boolean) || null;
   }
-  globalThis.XMuteX = {LIST, ADD, account, list, form, setKeyword, setOptions, ready, error};
+  function postTexts(article) {
+    return [...article.querySelectorAll('[data-testid="tweetText"]')].map(block => {
+      const read = node => {
+        if (node.nodeType === Node.TEXT_NODE) return node.data;
+        if (node.nodeType !== Node.ELEMENT_NODE || node.matches('[aria-hidden="true"],script,style,[hidden]')) return '';
+        if (node.tagName === 'BR') return '\n';
+        if (node.tagName === 'IMG') return node.getAttribute('alt') || '';
+        return [...node.childNodes].map(read).join('');
+      };
+      return read(block);
+    });
+  }
+  globalThis.XMuteX = {LIST, ADD, account, list, mutedSnapshot, postTexts, form, setKeyword, setOptions, ready, error};
 })();
