@@ -132,9 +132,9 @@ test('bulk imports merge atomically, serialize with other edits, persist and iso
   assert.equal(h.store().job, null);
   assert.equal(h.tabs.size, 1, 'import does not open an X settings tab');
   await h.message('apply');
-  await assert.rejects(h.message('text:import', {text: 'blocked'}), /current batch/);
+  await h.message('text:import', {text: 'while running'});
   await h.message('stop');
-  await assert.rejects(h.message('text:import', {text: 'still blocked'}), /current batch/);
+  await h.message('text:import', {text: 'while stopped'});
   await h.message('end');
   await h.message('text:import', {text: 'allowed'});
 });
@@ -157,13 +157,15 @@ test('text export includes cached mutes and pending words, supports bag only, an
   await h.message('apply');
   assert.equal((await h.message('text:export', {scope: 'bag'})).count, 2, 'export is available during a batch');
 });
-test('phrase replacement is atomic and paused jobs reject picker mutations', async () => {
+test('phrase replacement remains available and cannot change a native batch snapshot', async () => {
   const h = harness();
   const first = await h.message('pick', {text: 'John'});
   const full = await h.message('pick', {text: 'John Smith', replace: first.selection});
   assert.deepEqual(full.bag.map(i => i.text), ['John Smith']);
   await h.message('apply');
-  await assert.rejects(h.message('pick', {text: 'John Smith Junior', replace: full.selection}), /current batch/);
+  await h.message('stop');
+  await h.message('pick', {text: 'John Smith Junior', replace: full.selection});
+  assert.equal(h.store().accounts.tester.bag[0].text, 'John Smith Junior');
   assert.equal(h.store().job.items[0].text, 'John Smith');
 });
 test('batch isolates its tab, checkpoints before Save, and removes only confirmed entries', async () => {
@@ -173,7 +175,8 @@ test('batch isolates its tab, checkpoints before Save, and removes only confirme
   const job = h.store().job;
   assert.notEqual(job.tabId, 1);
   assert.equal(h.tabs.get(1).url, 'https://x.com/home');
-  await assert.rejects(h.message('add', {text: 'four'}), /current batch/);
+  await h.message('add', {text: 'four'});
+  assert.equal(h.store().job.items.length, 3);
   await assert.rejects(h.message('runner:missing', {jobId: job.id, itemId: job.items[0].id}, 1), /no longer/);
   await h.runner('runner:found');
   await h.runner('runner:missing');
@@ -183,7 +186,7 @@ test('batch isolates its tab, checkpoints before Save, and removes only confirme
   await h.runner('runner:found');
   await h.runner('runner:found');
   assert.equal(h.store().job.status, 'complete');
-  assert.equal(h.store().accounts.tester.bag.length, 0);
+  assert.deepEqual(h.store().accounts.tester.bag.map(word => word.text), ['four']);
   assert.equal(h.tabs.has(job.tabId), false);
   assert.equal(h.tabs.has(1), true);
   assert.deepEqual(C.counts(h.store().job), {added: 1, skipped: 2, failed: 0, total: 3});
@@ -201,6 +204,48 @@ test('uncertain save resumes by checking the list before another submission', as
   assert.equal(h.store().job.items[0].attempted, true);
   await h.runner('runner:found');
   assert.equal(h.store().job.items[0].status, 'added');
+});
+test('running, retrying and stopped native batches never lock local additions, editing or imports', async () => {
+  for (const status of ['running', 'retrying', 'paused']) {
+    const h = harness();
+    await h.message('add', {text: 'native snapshot'}); await h.message('apply');
+    if (status === 'retrying') await h.runner('runner:failed', {error: 'Native limit reached'});
+    if (status === 'paused') await h.message('stop');
+    const snapshot = h.store().job;
+    const restarted = harness(h.backing);
+    await restarted.message('view');
+    await restarted.message('add', {text: 'typed'});
+    await restarted.message('text:import', {text: 'pasted\nfile entry'});
+    const picked = await restarted.message('pick', {text: 'phrase'});
+    await restarted.message('pick', {text: 'phrase extended', replace: picked.selection});
+    await restarted.message('edit', {id: snapshot.items[0].id, text: 'edited local draft'});
+    await restarted.message('options', {options: {...C.DEFAULTS, duration: '7d'}});
+    assert.deepEqual(restarted.store().job, snapshot, 'native retry state and snapshot remain unchanged');
+    assert.deepEqual(restarted.store().accounts.tester.bag.map(word => word.text),
+      ['edited local draft', 'typed', 'pasted', 'file entry', 'phrase extended']);
+    const typed = restarted.store().accounts.tester.bag.find(word => word.text === 'typed');
+    await restarted.message('remove', {id: typed.id});
+    await restarted.message('clear');
+    await restarted.message('text:import', {text: 'next local word'});
+    await restarted.message('local:apply');
+    assert.equal(restarted.store().job.status, 'stopped');
+    assert.equal(restarted.alarms.size, 0);
+    assert.deepEqual(restarted.store().accounts.tester.localWords.map(word => word.text), ['native snapshot', 'next local word']);
+    assert.equal(restarted.store().accounts.tester.bag.length, 0);
+  }
+});
+test('late native confirmations retain edited drafts and re-added words', async () => {
+  const h = harness();
+  await h.message('text:import', {text: 'old phrase\nunchanged\nreadded'});
+  await h.message('apply');
+  const snapshot = h.store().job.items;
+  await h.message('edit', {id: snapshot[0].id, text: 'new phrase'});
+  await h.message('remove', {id: snapshot[2].id});
+  await h.message('text:import', {text: 'readded\nnew word'});
+  assert.notEqual(h.store().accounts.tester.bag.find(word => word.text === 'readded').id, snapshot[2].id);
+  await h.runner('runner:found'); await h.runner('runner:found'); await h.runner('runner:found');
+  assert.equal(h.store().job.status, 'complete');
+  assert.deepEqual(h.store().accounts.tester.bag.map(word => word.text), ['new phrase', 'readded', 'new word']);
 });
 test('worker restart restores the alarm; browser restart automatically rechecks the interrupted batch', async () => {
   const h = harness();
@@ -252,7 +297,7 @@ test('automatic retries have capped backoff without an attempt limit and reject 
     assert.equal(retry.retryCount, attempt);
     assert.equal(retry.retryAt - h.clock.now, C.retryDelay(attempt));
     assert.equal(retry.phase, 'verify');
-    await assert.rejects(h.message('text:import', {text: 'locked'}), /current batch/);
+    assert.equal((await h.message('text:import', {text: 'first'})).imported.duplicates, 1);
     await h.message('filters:sync', {force: true});
     assert.equal(h.store().filterSync, undefined, 'sync cannot interfere with a retrying batch');
     do { await h.fireAlarm(); } while (h.store().job.status === 'retrying');

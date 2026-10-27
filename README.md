@@ -19,6 +19,7 @@ After updating, **Reload** the extension and refresh open X tabs.
 
 - Click the toolbar icon, then click words in posts to collect them. Click the first word and **Shift-click** the last word to collect a phrase, including across inline spans. Repeated clicks and imports deduplicate case-insensitively.
 - Type expressions directly into the bag, or open **More options → Import words** to paste text or load a UTF-8 `.txt` file. Use one word or expression per line. Imports merge with the bag for review; they do not change X settings.
+- Adding, picking, importing, and editing local drafts stay available even when a native X batch is running, retrying, or stopped. You do not have to resume or end a native batch to add more words.
 - Click **Filter N words**. The entire bag is saved to the local filter immediately and matching posts disappear. There is no native mute queue or delay between entries. Drafts stay visible until you apply them, so phrase picking is not interrupted by a disappearing post.
 - Saved filters work with the panel closed and after browser restarts. They are permanent until removed, stored separately for each signed-in X account. Native mute settings and cache expiry cannot erase them.
 - Open **More options → Saved filters** to search and remove words. Removing a local rule restores posts unless another local rule, an account rule, or a native X mute still applies. Saved-list search displays up to 50 matches; large bags reveal 100 entries at a time to keep the panel responsive.
@@ -55,9 +56,11 @@ Use **Copy text** or **Download .txt**. Reimport exported files and click **Filt
 
 Native options default to forever, Home timeline, and notifications from anyone. These settings affect native X muting only; saved local filters remain permanent. A separate background tab saves sequentially using X’s Add link. There is no fixed wait between successful entries. Existing native words are skipped, confirmed entries leave the bag, and your feed stays in place.
 
+Each native batch keeps the words and settings captured when it started. Later draft additions, edits, removals, or settings changes do not alter that batch. A late confirmation removes only the unchanged original draft; edited and newly added drafts remain. Use **Stop** or **End batch** to stop the captured native work.
+
 Failed native saves retry indefinitely, starting after 30 seconds and backing off to five minutes. Each retry checks the list before resubmitting an uncertain save. Retries recover from closed/stalled tabs and browser restarts. Account changes or sign-out prevent saves until the original account is restored. Chrome can delay attempts while asleep or busy.
 
-**Stop** cancels retries; **Resume / retry** restarts an intentional stop. Under batch **Details**, use **Retry now**, **Settings tab**, or **End batch**. End releases pending entries for editing. **Filter N words** switches the remaining bag to local filtering and ends native retries. Already saved native words stay muted.
+**Stop** cancels retries; **Resume / retry** restarts an intentional stop. Under batch **Details**, use **Retry now**, **Settings tab**, or **End batch**. End finishes that native batch while keeping pending drafts. **Filter N words** switches the remaining bag to local filtering and ends native retries. Already saved native words stay muted.
 
 Native muted words are also cached for local filtering and refreshed about every ten minutes while X is open. This temporary cache expires after fifteen minutes without a refresh; saved local filters do not expire. Native unmuting affects the native cache, while a separately saved local rule remains until you remove it.
 

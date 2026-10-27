@@ -107,6 +107,50 @@ async function until(probe, label) {
     await page.reload(); await page.locator('[data-testid=tweetText]').first().waitFor(); await scene();
     await until(async () => !await page.locator('#direct').isVisible(), 'saved filters active without opening the panel');
     assert.equal(await page.locator('#quoted').isVisible(), true, 'removal persists');
+    // Reproduce a persisted stopped native batch. Opening the bag must still
+    // allow typing, picking, paste/file import, and another local Apply.
+    await worker.evaluate(() => exclusively(async () => {
+      const state = await readStore();
+      const data = accountState(state, 'tester');
+      data.bag = [C.entry('native pending')];
+      state.job = C.createJob('tester', data.bag, data.options, null);
+      pause(state.job, 'Stopped. Resume when you are ready;');
+      await persist(state);
+    }));
+    await page.reload(); await page.locator('[data-testid=tweetText]').first().waitFor();
+    await toggle();
+    await panel.getByRole('button', {name: /Picking words/}).waitFor();
+    assert.equal(await panel.getByRole('textbox', {name: 'Add a word or phrase', exact: true}).isEnabled(), true);
+    await panel.getByRole('textbox', {name: 'Add a word or phrase', exact: true}).fill('typed while stopped');
+    await panel.getByRole('button', {name: 'Add entry', exact: true}).click();
+    await until(async () => (await store()).accounts.tester.bag.length === 2, 'typing during a stopped batch');
+    await page.evaluate(() => {
+      const node = document.querySelector('[data-testid=tweetText]').firstChild;
+      const range = document.createRange(); range.setStart(node, 0); range.setEnd(node, 4);
+      const rect = range.getBoundingClientRect();
+      node.parentElement.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true,clientX:rect.x+rect.width/2,clientY:rect.y+rect.height/2,button:0}));
+    });
+    await until(async () => (await store()).accounts.tester.bag.some(word => word.text === 'Café'), 'picking during a stopped batch');
+    await reveal('import-tools');
+    await panel.getByRole('textbox', {name: 'Words to import', exact: true}).fill('pasted while stopped');
+    await panel.getByRole('button', {name: 'Add lines to bag', exact: true}).click();
+    await until(async () => (await store()).accounts.tester.bag.length === 4, 'pasting during a stopped batch');
+    await panel.locator('#import-file').setInputFiles({name:'more.txt',mimeType:'text/plain',buffer:Buffer.from('file while stopped')});
+    await until(async () => (await panel.locator('#transfer-status').textContent()).includes('more.txt loaded'), 'file during stopped batch');
+    await panel.getByRole('button', {name: 'Add lines to bag', exact: true}).click();
+    await until(async () => (await store()).accounts.tester.bag.length === 5, 'file import during a stopped batch');
+    assert.equal((await store()).job.status, 'paused');
+    await panel.getByRole('textbox', {name: 'Edit native pending', exact: true}).fill('edited while stopped');
+    await panel.getByRole('textbox', {name: 'Edit native pending', exact: true}).press('Enter');
+    await until(async () => (await store()).accounts.tester.bag[0].text === 'edited while stopped', 'draft editing during a stopped batch');
+    assert.equal((await store()).job.items[0].text, 'native pending');
+    await panel.getByRole('button', {name: 'Filter 5 words', exact: true}).click();
+    await until(async () => (await store()).accounts.tester.bag.length === 0, 'filter more words despite old stopped batch');
+    assert.equal((await store()).job.status, 'stopped');
+    for (const text of ['edited while stopped', 'typed while stopped', 'Café', 'pasted while stopped', 'file while stopped']) {
+      assert.equal((await store()).accounts.tester.localWords.some(word => word.text === text), true, text);
+    }
+    console.log('PASS: a persisted stopped native batch cannot lock typing, picking, editing, paste/file import, or local Apply');
     model.account = 'other';
     await page.reload(); await page.locator('[data-testid=tweetText]').first().waitFor(); await scene();
     await until(async () => (await store()).accounts.other != null, 'new account loaded');

@@ -166,8 +166,11 @@ async function until(probe, label, timeout = 15000) {
     for (const word of ['existing', 'new one', 'new two']) await add(word);
     await reveal('mute-options');
     await panel.getByLabel('Home timeline', {exact: true}).uncheck();
+    await until(async () => (await store()).accounts.tester.options.home === false, 'Home option saved');
     await panel.getByLabel('Notification audience', {exact: true}).selectOption('unfollowed');
+    await until(async () => (await store()).accounts.tester.options.audience === 'unfollowed', 'audience option saved');
     await panel.getByLabel('Mute duration', {exact: true}).selectOption('7d');
+    await until(async () => (await store()).accounts.tester.options.duration === '7d', 'duration option saved');
     await page.evaluate(() => scrollTo(0, 100));
     const beforeScroll = await page.evaluate(() => scrollY);
     await apply(3);

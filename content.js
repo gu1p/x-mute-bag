@@ -11,7 +11,6 @@
   const runnerWaiters = new Set();
   let transferBusy = false;
   let bagLimit = 100;
-  const locked = () => C.activeJob(state?.job);
   async function request(type, fields = {}) {
     const reply = await chrome.runtime.sendMessage({type, account: X.account(), ...fields});
     if (!reply?.ok) throw new Error(reply?.error || 'The extension was reloaded. Refresh this X tab.');
@@ -66,7 +65,7 @@
       transferStatus('');
       transferStatus('', false, true);
     }
-    const disabled = !available || locked() || transferBusy;
+    const disabled = !available || transferBusy;
     $('import-text').disabled = disabled;
     $('load-text').disabled = disabled;
     $('import-file').disabled = disabled;
@@ -170,7 +169,7 @@
       '<div class="tools" id="bag-tools"><button id="clear">Clear bag</button></div>',
       '<button class="apply" id="apply">Filter words</button><p class="hint" id="local-status">Filters posts on this device. No X mute limit.</p>',
       '<div class="status" id="status" role="status" aria-live="polite" hidden><div class="status-heading"><div><div id="status-text"></div><p class="hint" id="status-next" hidden></p></div><div class="batch-actions" id="batch-actions"></div></div>',
-      '<details id="batch-details"><summary>Details</summary><div class="progress"><div class="bar" id="bar"></div></div><div id="status-counts"></div><p id="status-error"></p><div class="batch-actions" id="batch-extra-actions"></div></details></div>',
+      '<details id="batch-details"><summary>Details</summary><div class="progress"><div class="bar" id="bar"></div></div><div id="status-counts"></div><p class="hint">This X batch uses the words and settings captured when it started. You can keep adding local filters.</p><p id="status-error"></p><div class="batch-actions" id="batch-extra-actions"></div></details></div>',
       '<details class="more-options" id="more-options"><summary>More options</summary>',
       '<details id="local-tools"><summary id="local-summary">Saved filters</summary><p class="hint">Stored on this device until removed. Native X mutes are separate.</p><input id="local-search" type="text" aria-label="Search saved filters" placeholder="Search saved filters…" autocomplete="off"><p id="local-info" class="hint"></p><ul id="local-words" class="rules" aria-label="Saved local filters"></ul></details>',
       '<div class="transfer" id="transfer"><details id="import-tools"><summary>Import words</summary>',
@@ -225,7 +224,7 @@
       finally { transferBusy = false; renderTransfer(); }
     };
     $('import-text-button').onclick = async () => {
-      if (transferBusy || locked() || !state || state.account !== X.account()) return;
+      if (transferBusy || !state || state.account !== X.account()) return;
       const text = $('import-text').value, account = state.account;
       transferBusy = true; renderTransfer();
       try {
@@ -272,7 +271,7 @@
     if (!shadow || !visible) return;
     const $ = id => shadow.getElementById(id);
     const bag = state?.bag || [];
-    const disabled = locked() || !state;
+    const disabled = !state;
     renderTransfer();
     renderLocalWords();
     const filter = XMuteTimeline.status();
@@ -363,15 +362,15 @@
     for (const name of ['audience', 'duration']) { $(name).value = prefs[name]; $(name).disabled = disabled || (name === 'audience' && !prefs.notifications); }
     const duration = {forever: 'Forever', '24h': '24 hours', '7d': '7 days', '30d': '30 days'}[prefs.duration];
     $('summary').textContent = 'Mute on X (optional) · ' + duration;
-    $('mute-on-x').disabled = disabled || !bag.length;
+    $('mute-on-x').disabled = disabled || !bag.length || C.activeJob(state?.job);
     $('apply').disabled = !state || !bag.length;
     $('apply').textContent = 'Filter ' + (bag.length ? bag.length + ' ' + (bag.length === 1 ? 'word' : 'words') : 'words');
     const job = state?.job;
     $('status').hidden = !job || job.status === 'stopped' || (job.status === 'complete' && bag.length > 0);
     if (job) {
       const counts = C.counts(job), finished = counts.added + counts.skipped;
-      $('status-text').textContent = job.status === 'running' ? 'Applying ' + Math.min(job.index + 1, counts.total) + ' of ' + counts.total :
-        job.status === 'retrying' ? 'Retrying automatically' : job.status === 'paused' ? 'Stopped' : 'Done · ' + finished + ' processed';
+      $('status-text').textContent = job.status === 'running' ? 'Muting on X · ' + Math.min(job.index + 1, counts.total) + ' of ' + counts.total :
+        job.status === 'retrying' ? 'Retrying automatically on X' : job.status === 'paused' ? 'X batch stopped' : 'Done on X · ' + finished + ' processed';
       $('status-next').hidden = job.status !== 'retrying';
       $('status-next').textContent = job.status === 'retrying' ? 'Next attempt at ' + new Date(job.retryAt).toLocaleTimeString() : '';
       $('status-counts').textContent = counts.added + ' added · ' + counts.skipped + ' already muted' +
@@ -436,7 +435,7 @@
   }
   let highlightStyle;
   function setPicking(value) {
-    active = !!value && !!state && !locked();
+    active = !!value && !!state;
     anchor = null; shiftHeld = false; pickGeneration++;
     hover = null;
     if (active) {
@@ -502,7 +501,7 @@
     }
   }
   async function pickWord(found, extend, generation) {
-    if (!active || generation !== pickGeneration || locked()) return;
+    if (!active || generation !== pickGeneration) return;
     // Re-resolve ranges after async bag writes or X recycling its tweet elements.
     collectRanges();
     found = records.find(r => r.element === found.element && r.source === found.source && r.start === found.start && r.end === found.end);
@@ -670,7 +669,7 @@
         if (visible && active) { setPicking(false); visible = false; host.hidden = true; }
         else {
           visible = true; host.hidden = false; collapsed = false;
-          await refresh(); setPicking(!locked());
+          await refresh(); setPicking(true);
         }
       })().catch(error => setNotice(error.message));
       respond({ok: true});

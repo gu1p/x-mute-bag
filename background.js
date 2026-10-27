@@ -292,7 +292,9 @@ async function handle(message, sender) {
           data.filter.terms = [...data.filter.terms.filter(word => word.key !== term.key), term];
         }
         C.finishItem(job, item.attempted ? 'added' : 'skipped');
-        data.bag = data.bag.filter(word => word.id !== item.id);
+        // The native batch owns a snapshot. A confirmation must not consume a
+        // draft edited since the batch started, or a newly imported replacement.
+        data.bag = data.bag.filter(word => word.id !== item.id || word.key !== item.key);
         break;
       }
       case 'runner:failed':
@@ -315,10 +317,8 @@ async function handle(message, sender) {
     const local = message.scope === 'bag' ? [] : data.localWords;
     return {account, ...C.exportText([...muted, ...local, ...(message.scope === 'local' ? [] : data.bag)])};
   }
-  const locked = state.job?.account === account && C.activeJob(state.job);
-  if (['add', 'pick', 'edit', 'remove', 'clear', 'options', 'text:import'].includes(message.type) && locked) {
-    throw new Error('Finish or end the current batch before editing your bag.');
-  }
+  // Local drafts are independent of the immutable native batch snapshot.
+  // Running, retrying and deliberately paused native work must never lock them.
   switch (message.type) {
     case 'text:import': {
       const {bag, added, duplicates} = C.importText(data.bag, message.text);
