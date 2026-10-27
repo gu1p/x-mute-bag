@@ -44,6 +44,7 @@ const boot = (async () => {
     retry(job, job.error || 'Retrying the interrupted batch.');
   }
   if (job?.status === 'running' && !job.runId) retry(job, 'Extension updated. Rechecking saved words automatically.');
+  for (const account of Object.keys(state.accounts)) accountState(state, account);
   await persist(state);
 })();
 function validSender(sender) {
@@ -56,12 +57,18 @@ function accountState(state, account) {
   });
   const data = state.accounts[account];
   data.filter ||= {enabled: true, terms: [], syncedAt: 0, lastAttemptAt: 0, error: ''};
+  // One-time migration: retain known words and interrupted batches independently
+  // of X's native limit, future syncs, or the temporary native mute cache.
+  if (!Array.isArray(data.localWords)) data.localWords = C.mergeWords([], [
+    ...data.filter.terms.filter(term => term.expiresAt == null || term.expiresAt > Date.now()),
+    ...(state.job?.account === account ? state.job.items : []), ...data.bag,
+  ]);
   data.replyRules ||= [];
   return data;
 }
 function filterView(state, account) {
   const data = accountState(state, account);
-  return {filter: data.filter, replyRules: data.replyRules, syncing: state.filterSync?.account === account && state.filterSync.status === 'running'};
+  return {filter: data.filter, localWords: data.localWords, replyRules: data.replyRules, syncing: state.filterSync?.account === account && state.filterSync.status === 'running'};
 }
 async function closeSync(state, error = '') {
   const sync = state.filterSync;
@@ -227,6 +234,23 @@ async function handle(message, sender) {
   }
   const account = C.accountKey(message.account);
   const data = accountState(state, account);
+  if (message.type === 'local:apply') {
+    if (!data.bag.length) throw new Error('Add a word to your bag first.');
+    data.localWords = C.mergeWords(data.localWords, data.bag);
+    data.bag = [];
+    data.filter.enabled = true;
+    if (state.job?.account === account && C.activeJob(state.job)) {
+      state.job.status = 'stopped'; state.job.retryAt = null;
+      state.job.error = 'Words saved to the local filter. Native muting ended.';
+    }
+    await persist(state);
+    return view(state, account);
+  }
+  if (message.type === 'local:remove') {
+    data.localWords = data.localWords.filter(word => word.id !== message.id);
+    await persist(state);
+    return view(state, account);
+  }
   if (message.type.startsWith('filters:')) return filters(message, sender, state, account);
   if (message.type.startsWith('replies:')) {
     const handle = C.userHandle(message.handle);
@@ -286,9 +310,10 @@ async function handle(message, sender) {
   }
   if (message.type === 'view') return view(state, account);
   if (message.type === 'text:export') {
-    if (!['bag', 'all'].includes(message.scope)) throw new Error('Choose which words to export.');
+    if (!['bag', 'local', 'all'].includes(message.scope)) throw new Error('Choose which words to export.');
     const muted = message.scope === 'all' ? data.filter.terms.filter(term => term.expiresAt == null || term.expiresAt > Date.now()) : [];
-    return {account, ...C.exportText([...muted, ...data.bag])};
+    const local = message.scope === 'bag' ? [] : data.localWords;
+    return {account, ...C.exportText([...muted, ...local, ...(message.scope === 'local' ? [] : data.bag)])};
   }
   const locked = state.job?.account === account && C.activeJob(state.job);
   if (['add', 'pick', 'edit', 'remove', 'clear', 'options', 'text:import'].includes(message.type) && locked) {
@@ -315,6 +340,7 @@ async function handle(message, sender) {
     case 'apply': {
       if (C.activeJob(state.job)) throw new Error('Finish or end the existing batch first.');
       await closeSync(state);
+      data.localWords = C.mergeWords(data.localWords, data.bag);
       state.job = C.createJob(account, data.bag, data.options, sender.tab.id);
       // Persist the intent before allocating the tab.
       await persist(state);

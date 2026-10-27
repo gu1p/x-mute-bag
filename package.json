@@ -1,11 +1,11 @@
 {
   "name": "x-mute-bag",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "private": true,
   "description": "A local-first Chrome extension for picking and muting words on X",
   "scripts": {
     "test": "node --test tests/core.test.cjs tests/background.test.cjs",
-    "test:browser": "node tests/browser.cjs && node tests/batch-speed.cjs",
+    "test:browser": "node tests/browser.cjs && node tests/local-filter.cjs && node tests/batch-speed.cjs",
     "check": "node --check core.js && node --check background.js && node --check x-adapter.js && node --check filter.js && node --check content.js && npm test && npm run test:browser",
     "package": "node scripts/package.cjs"
   },

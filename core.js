@@ -121,26 +121,61 @@
     return hours ? now + hours * 3600000 : null;
   }
   function muteMatcher(terms, now = Date.now()) {
-    const patterns = terms.filter(term => (term.expiresAt == null || term.expiresAt > now) &&
-      (term.validUntil == null || term.validUntil > now)).map(term => {
-      const word = key(term.text);
-      if (!word) return null;
-      const escaped = word.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
-      const hashtag = /^[\p{L}\p{M}\p{N}_]/u.test(word) ? '#?' : '';
-      // Word/handle boundaries prevent "cat" matching "education" or "@cats".
-      return new RegExp('(?<![\\p{L}\\p{M}\\p{N}_@#])' + hashtag + escaped + '(?![\\p{L}\\p{M}\\p{N}_])', 'u');
-    }).filter(Boolean);
-    return text => {
-      const normalized = key(text);
-      return patterns.some(pattern => pattern.test(normalized));
+    // A prefix tree shares work across large dictionaries instead of running
+    // one regular expression per word against every post.
+    const root = {next: new Map(), end: false};
+    const wordChar = /[\p{L}\p{M}\p{N}_]/u, preceding = /[\p{L}\p{M}\p{N}_@#]/u;
+    const insert = word => {
+      let node = root;
+      for (const char of word) {
+        if (!node.next.has(char)) node.next.set(char, {next: new Map(), end: false});
+        node = node.next.get(char);
+      }
+      node.end = true;
     };
+    for (const term of terms) {
+      if (term.expiresAt != null && term.expiresAt <= now || term.validUntil != null && term.validUntil <= now) continue;
+      const word = key(term.text);
+      if (!word) continue;
+      insert(word);
+      if (wordChar.test([...word][0])) insert('#' + word);
+    }
+    return text => {
+      const chars = [...key(text)];
+      for (let start = 0; start < chars.length; start++) {
+        if (start && preceding.test(chars[start - 1])) continue;
+        let node = root;
+        for (let end = start; end < chars.length; end++) {
+          node = node.next.get(chars[end]);
+          if (!node) break;
+          if (node.end && !wordChar.test(chars[end + 1] || '')) return true;
+        }
+      }
+      return false;
+    };
+  }
+  function filterTerms(filter, localWords = [], now = Date.now()) {
+    const terms = new Map();
+    for (const term of filter?.terms || []) {
+      if ((term.expiresAt == null || term.expiresAt > now) && (term.validUntil == null || term.validUntil > now)) terms.set(key(term.text), term);
+    }
+    for (const term of localWords) terms.set(key(term.text), {text: term.text, key: key(term.text)});
+    return [...terms.values()];
+  }
+  function mergeWords(existing, incoming) {
+    const words = new Map(existing.map(word => [key(word.text), word]));
+    for (const word of incoming) {
+      const normalized = key(word.text);
+      if (!words.has(normalized)) words.set(normalized, entry(word.text));
+    }
+    return [...words.values()];
   }
   function userHandle(value) {
     const handle = typeof value === 'string' ? value.trim().replace(/^https:\/\/(?:www\.)?x\.com\/([^/?#]+)\/?(?:[?#].*)?$/i, '$1').replace(/^@/, '') : '';
     if (!/^[a-zA-Z0-9_]{1,15}$/.test(handle)) throw new Error('Enter an X @username or profile link.');
     return handle.toLowerCase();
   }
-  const api = {DEFAULTS, FILTER_SYNC_MS, FILTER_CACHE_MS, TEXT_LIMIT, BATCH_STALE_MS, retryDelay, activeJob, clean, key, accountKey, userHandle, entry, options, add, importText, exportText, edit, pick, tokens, createJob, finishItem, counts, muteDeadline, muteMatcher};
+  const api = {DEFAULTS, FILTER_SYNC_MS, FILTER_CACHE_MS, TEXT_LIMIT, BATCH_STALE_MS, retryDelay, activeJob, clean, key, accountKey, userHandle, entry, options, add, importText, exportText, edit, pick, tokens, createJob, finishItem, counts, muteDeadline, muteMatcher, filterTerms, mergeWords};
   globalThis.XMuteCore = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

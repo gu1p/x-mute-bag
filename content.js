@@ -10,6 +10,7 @@
   let runnerBusy = false, runnerQueued = false, cancelledJob = null, notice = '';
   const runnerWaiters = new Set();
   let transferBusy = false;
+  let bagLimit = 100;
   const locked = () => C.activeJob(state?.job);
   async function request(type, fields = {}) {
     const reply = await chrome.runtime.sendMessage({type, account: X.account(), ...fields});
@@ -58,6 +59,8 @@
     const available = !!state && state.account === account;
     if ($('transfer').dataset.account !== (account || '')) {
       $('transfer').dataset.account = account || '';
+      bagLimit = 100;
+      $('local-search').value = '';
       $('import-text').value = '';
       $('import-file').value = '';
       transferStatus('');
@@ -70,9 +73,28 @@
     $('import-text-button').disabled = disabled || !$('import-text').value.trim();
     for (const id of ['export-scope', 'copy-text', 'download-text']) $(id).disabled = !available || transferBusy;
     const syncedAt = available && state.filter?.syncedAt;
-    $('export-hint').textContent = $('export-scope').value === 'bag' ? 'Pending entries only.' :
+    $('export-hint').textContent = $('export-scope').value === 'local' ? 'Your permanent local filters, with no native X limit.' : $('export-scope').value === 'bag' ? 'Pending entries only.' :
       (syncedAt ? 'Last synced ' + new Date(syncedAt).toLocaleString() + '. ' : 'Muted words have not been synced yet. ') +
       'Refresh under Timeline filters for the latest list.';
+  }
+  function renderLocalWords() {
+    const $ = id => shadow.getElementById(id), words = state?.localWords || [];
+    $('local-summary').textContent = 'Saved filters' + (words.length ? ' · ' + words.length : '');
+    if (!$('local-tools').open) return;
+    const query = C.key($('local-search').value);
+    const matches = words.filter(word => word.key.includes(query)), shown = matches.slice(0, 50);
+    $('local-info').textContent = matches.length ? 'Showing ' + shown.length + ' of ' + matches.length + ' filters.' : 'No saved filters found.';
+    const signature = JSON.stringify([state?.account, shown]);
+    if ($('local-words').dataset.signature === signature) return;
+    $('local-words').replaceChildren(...shown.map(word => {
+      const li = document.createElement('li'); li.className = 'rule';
+      const text = document.createElement('span'); text.textContent = word.text; text.style.flex = '1';
+      const remove = document.createElement('button'); remove.textContent = '×';
+      remove.setAttribute('aria-label', 'Remove local filter ' + word.text);
+      remove.onclick = () => action('local:remove', {id: word.id});
+      li.append(text, remove); return li;
+    }));
+    $('local-words').dataset.signature = signature;
   }
   async function exportWords(copy) {
     if (transferBusy || !state || state.account !== X.account()) return;
@@ -120,6 +142,7 @@
       '.pick{width:100%;text-align:left;border-color:#466b60;background:#b8f4da0c}.pick[aria-pressed=true]{border-color:#8fe4c0;color:#b8f4da}.hint{color:#a0adbe;font-size:12px;margin:8px 0 12px}',
       '.empty{padding:16px 0 6px;color:#a0adbe;text-align:center;font-size:12px}',
       '.entries{list-style:none;padding:0;margin:12px 0 0;display:grid;gap:6px;max-height:224px;overflow:auto}.entry{display:flex;gap:6px;align-items:center}',
+      '#more-entries{width:100%;margin-top:6px;border:0;font-size:11px;color:#a0adbe}',
       'input[type=text],select,textarea{min-width:0;background:#0e141c;border:1px solid #465368;border-radius:8px;color:inherit;padding:8px 9px} .entry input{width:100%}.entry button{border:0;padding:7px}.entry input:disabled{opacity:.7}',
       '.add{display:flex;gap:7px;margin-top:10px}.add input{flex:1;width:100%}.add button{padding:7px 12px}',
       '.tools{display:flex;justify-content:flex-end;margin:5px 0 0;color:#a0adbe;font-size:11px}.tools button{border:0;padding:2px 0;font-size:11px}',
@@ -142,29 +165,31 @@
       '<div class="body" id="body"><button class="pick" id="pick" aria-pressed="false">Start picking words</button>',
       '<p class="hint" id="pick-hint" hidden>Shift-click the last word to select a phrase.</p>',
       '<div class="empty" id="empty">Pick a word or add one below.</div><ul class="entries" id="entries" aria-label="Collected words"></ul>',
+      '<button id="more-entries" hidden>Show more words</button>',
       '<form class="add" id="add-form"><input id="new-word" type="text" aria-label="Add a word or phrase" placeholder="Add a word or phrase…" maxlength="560" autocomplete="off"><button id="add" type="submit" aria-label="Add entry">+</button></form>',
       '<div class="tools" id="bag-tools"><button id="clear">Clear bag</button></div>',
-      '<button class="apply" id="apply">Apply muted words</button>',
+      '<button class="apply" id="apply">Filter words</button><p class="hint" id="local-status">Filters posts on this device. No X mute limit.</p>',
       '<div class="status" id="status" role="status" aria-live="polite" hidden><div class="status-heading"><div><div id="status-text"></div><p class="hint" id="status-next" hidden></p></div><div class="batch-actions" id="batch-actions"></div></div>',
       '<details id="batch-details"><summary>Details</summary><div class="progress"><div class="bar" id="bar"></div></div><div id="status-counts"></div><p id="status-error"></p><div class="batch-actions" id="batch-extra-actions"></div></details></div>',
       '<details class="more-options" id="more-options"><summary>More options</summary>',
+      '<details id="local-tools"><summary id="local-summary">Saved filters</summary><p class="hint">Stored on this device until removed. Native X mutes are separate.</p><input id="local-search" type="text" aria-label="Search saved filters" placeholder="Search saved filters…" autocomplete="off"><p id="local-info" class="hint"></p><ul id="local-words" class="rules" aria-label="Saved local filters"></ul></details>',
       '<div class="transfer" id="transfer"><details id="import-tools"><summary>Import words</summary>',
       '<p class="hint" id="import-hint">One word or expression per line. Blank lines and duplicates are skipped.</p>',
       '<textarea id="import-text" aria-label="Words to import" aria-describedby="import-hint" rows="4" placeholder="spoiler&#10;John Smith&#10;another expression" spellcheck="false"></textarea>',
       '<input id="import-file" type="file" accept=".txt,text/plain" aria-label="Import text file" hidden>',
       '<div class="batch-actions"><button id="load-text">Load .txt file</button><button id="import-text-button">Add lines to bag</button></div>',
-      '<p class="hint">Review your bag, then Apply.</p>',
+      '<p class="hint">Review your bag, then Filter.</p>',
       '<p class="hint" id="transfer-status" role="status" aria-live="polite"></p></details>',
       '<details id="export-tools"><summary>Export words</summary>',
-      '<label class="export-label">Export<select id="export-scope" aria-label="Export source"><option value="all">Muted words + bag</option><option value="bag">Bag only</option></select></label>',
+      '<label class="export-label">Export<select id="export-scope" aria-label="Export source"><option value="all">All words</option><option value="local">Saved local filters</option><option value="bag">Bag only</option></select></label>',
       '<p class="hint" id="export-hint"></p><div class="batch-actions"><button id="copy-text">Copy text</button><button id="download-text">Download .txt</button></div>',
       '<p class="hint">Words only; settings and account rules are not included.</p>',
       '<p class="hint" id="export-status" role="status" aria-live="polite"></p></details></div>',
-      '<details id="mute-options"><summary id="summary">Mute settings · Forever</summary><div class="options">',
+      '<details id="mute-options"><summary id="summary">Mute on X (optional)</summary><p class="hint">Also send the bag to X’s native mute list. X’s own limit applies.</p><div class="options">',
       '<label><input type="checkbox" id="home">Home timeline</label><label><input type="checkbox" id="notifications">Notifications</label>',
       '<label>From<select id="audience" aria-label="Notification audience"><option value="anyone">Anyone</option><option value="unfollowed">People you don’t follow</option></select></label>',
       '<label>Duration<select id="duration" aria-label="Mute duration"><option value="forever">Forever</option><option value="24h">24 hours</option><option value="7d">7 days</option><option value="30d">30 days</option></select></label>',
-      '</div></details><details id="filter-settings"><summary>Timeline filters</summary>',
+      '</div><div class="batch-actions"><button id="mute-on-x">Mute bag on X</button></div></details><details id="filter-settings"><summary>Timeline filters</summary>',
       '<div class="filter"><label><input id="filter-enabled" type="checkbox" checked>Hide muted posts, including quotes</label><p id="filter-info" role="status"></p><button id="sync-muted">Sync muted words</button></div>',
       '<details class="accounts" id="account-settings"><summary>Account filters <span id="reply-count"></span></summary><p class="hint">Hide replies to other accounts. Keep original posts and self-threads.</p>',
       '<form class="add" id="reply-form"><input id="reply-handle" type="text" aria-label="Hide replies from account" placeholder="@username or X profile link" list="reply-suggestions" autocomplete="off" maxlength="200"><datalist id="reply-suggestions"></datalist><button id="reply-add" type="submit">Add</button></form>',
@@ -177,6 +202,9 @@
     $('collapse').onclick = () => { collapsed = !collapsed; render(); };
     $('pick').onclick = () => setPicking(!active);
     $('clear').onclick = () => action('clear');
+    $('more-entries').onclick = () => { bagLimit += 100; render(); };
+    $('local-tools').ontoggle = renderLocalWords;
+    $('local-search').oninput = renderLocalWords;
     $('import-text').oninput = () => { transferStatus(''); renderTransfer(); };
     $('export-scope').onchange = () => { transferStatus('', false, true); renderTransfer(); };
     $('load-text').onclick = () => $('import-file').click();
@@ -206,7 +234,7 @@
         const result = await action('text:import', {text, account});
         if (!result) { transferStatus(notice || 'The X account changed. Try importing again.', true); setNotice(''); return; }
         $('import-text').value = '';
-        transferStatus(result.imported.added + ' added to bag · ' + result.imported.duplicates + ' duplicates skipped. Review your bag, then Apply.');
+        transferStatus(result.imported.added + ' added to bag · ' + result.imported.duplicates + ' duplicates skipped. Review your bag, then Filter.');
       } catch (error) { transferStatus(error.message, true); }
       finally { transferBusy = false; renderTransfer(); }
     };
@@ -220,6 +248,11 @@
     };
     $('apply').onclick = async () => {
       // Include the last Shift-click even if its bag update is still in flight.
+      await pickQueue;
+      setPicking(false);
+      await action('local:apply');
+    };
+    $('mute-on-x').onclick = async () => {
       await pickQueue;
       setPicking(false);
       await action('apply');
@@ -241,13 +274,15 @@
     const bag = state?.bag || [];
     const disabled = locked() || !state;
     renderTransfer();
+    renderLocalWords();
     const filter = XMuteTimeline.status();
     $('filter-enabled').checked = filter.enabled;
     $('filter-enabled').disabled = !state;
     $('sync-muted').disabled = !state || !filter.enabled || filter.syncing || ['running', 'retrying'].includes(state.job?.status);
     $('filter-info').textContent = filter.error || (filter.syncing ? 'Syncing muted words from X…' :
-      filter.enabled ? filter.words + ' muted entries' : 'Muted-word filtering paused');
+      filter.enabled ? filter.words + ' filtered words' : 'Word filtering paused');
     $('filter-info').textContent += ' · ' + filter.hidden + ' posts hidden on this page';
+    $('local-status').textContent = (state?.localWords?.length || 0) ? state.localWords.length + ' saved filters · ' + (filter.enabled ? filter.hidden + ' posts hidden' : 'filtering paused') : 'Filters posts on this device. No X mute limit.';
     $('reply-handle').disabled = !state; $('reply-add').disabled = !state;
     const replyRules = state?.replyRules || [];
     $('reply-count').textContent = replyRules.length ? '(' + replyRules.filter(rule => rule.enabled).length + ' active)' : '';
@@ -290,14 +325,15 @@
     $('pick-hint').hidden = !active;
     $('pick').setAttribute('aria-pressed', String(active));
     $('pick').disabled = disabled;
-    const signature = JSON.stringify([bag, disabled]);
+    if (!bag.length) bagLimit = 100;
+    const signature = JSON.stringify([bag, disabled, bagLimit]);
     if ($('entries').dataset.signature !== signature) {
       // Keep focus/caret when an unrelated state notification arrives.
       const focused = shadow.activeElement;
       const focusId = focused?.dataset.entry;
       const selection = focusId ? [focused.selectionStart, focused.selectionEnd] : null;
       $('entries').replaceChildren();
-      for (const item of bag) {
+      for (const item of bag.slice(0, bagLimit)) {
         const li = document.createElement('li'); li.className = 'entry';
         const input = document.createElement('input');
         input.type = 'text'; input.value = item.text; input.dataset.entry = item.id;
@@ -317,6 +353,8 @@
     }
     $('empty').hidden = bag.length > 0;
     $('entries').hidden = !bag.length;
+    $('more-entries').hidden = bag.length <= bagLimit;
+    $('more-entries').textContent = 'Show ' + Math.min(100, bag.length - bagLimit) + ' more · ' + bag.length + ' total';
     $('bag-tools').hidden = !bag.length;
     $('clear').disabled = disabled || !bag.length;
     $('new-word').disabled = disabled; $('add').disabled = disabled;
@@ -324,9 +362,10 @@
     for (const name of ['home', 'notifications']) { $(name).checked = prefs[name]; $(name).disabled = disabled; }
     for (const name of ['audience', 'duration']) { $(name).value = prefs[name]; $(name).disabled = disabled || (name === 'audience' && !prefs.notifications); }
     const duration = {forever: 'Forever', '24h': '24 hours', '7d': '7 days', '30d': '30 days'}[prefs.duration];
-    $('summary').textContent = 'Mute settings · ' + duration;
-    $('apply').disabled = disabled || !bag.length;
-    $('apply').textContent = 'Apply ' + (bag.length ? bag.length + ' muted ' + (bag.length === 1 ? 'word' : 'words') : 'muted words');
+    $('summary').textContent = 'Mute on X (optional) · ' + duration;
+    $('mute-on-x').disabled = disabled || !bag.length;
+    $('apply').disabled = !state || !bag.length;
+    $('apply').textContent = 'Filter ' + (bag.length ? bag.length + ' ' + (bag.length === 1 ? 'word' : 'words') : 'words');
     const job = state?.job;
     $('status').hidden = !job || job.status === 'stopped' || (job.status === 'complete' && bag.length > 0);
     if (job) {

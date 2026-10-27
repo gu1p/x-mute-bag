@@ -1,6 +1,19 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../core.js');
+test('large local dictionaries preserve literal phrases, Unicode, overlapping prefixes and word boundaries', () => {
+  const words = Array.from({length: 10000}, (_, i) => ({text: 'entry ' + i}));
+  words.push(...['café do futuro', 'cat', 'cat videos', 'C++', '@someone', '🦊'].map(text => ({text})));
+  const matches = C.muteMatcher(words);
+  for (const text of ['entry 9999', 'A CAFÉ\nDO FUTURO!', '#cat', 'cat videos', 'C++!', '@someone', '🦊']) assert.equal(matches(text), true, text);
+  for (const text of ['entry 99999', 'education', '@cat', 'catapult', 'cafe do futuro', '@someone_else', 'nothing relevant']) assert.equal(matches(text), false, text);
+});
+test('local words do not expire with the native cache and override duplicate native deadlines', () => {
+  const terms = C.filterTerms({terms: [{text: 'expired', validUntil: 1}, {text: 'local', expiresAt: 1}, {text: 'native', validUntil: 100}]}, [{text: 'local'}, {text: 'saved'}], 50);
+  assert.deepEqual(terms.map(word => word.text), ['native', 'local', 'saved']);
+  assert.equal(C.muteMatcher(terms, 200)('local'), true);
+  assert.equal(C.muteMatcher(terms, 200)('native'), false);
+});
 test('retry delays back off to five minutes without a finite retry limit', () => {
   assert.deepEqual([1, 2, 3, 4, 5, 20, 1000].map(C.retryDelay), [30000, 60000, 120000, 240000, 300000, 300000, 300000]);
   assert.equal(C.activeJob({status: 'retrying'}), true);

@@ -68,6 +68,51 @@ test('concurrent bag mutations serialize and do not lose entries', async () => {
   await h.message('add', {account: '__proto__', text: 'safe'});
   assert.equal(h.store().accounts.__proto__.bag[0].text, 'safe');
 });
+test('local filtering saves thousands of words without native writes, persists, and survives native sync', async () => {
+  const h = harness(), words = Array.from({length: 5000}, (_, i) => 'local phrase ' + i);
+  await h.message('text:import', {text: words.join('\n')});
+  await h.message('local:apply');
+  assert.equal(h.store().accounts.tester.localWords.length, 5000);
+  assert.equal(h.store().accounts.tester.bag.length, 0);
+  assert.equal(h.store().job, null);
+  assert.equal(h.tabs.size, 1, 'local Apply does not open native settings');
+  assert.equal(h.alarms.size, 0);
+  await h.message('filters:import', {words: []}, 1, 'https://x.com/settings/muted_keywords');
+  const restarted = harness(h.backing);
+  assert.equal((await restarted.message('filters:get')).localWords.length, 5000);
+  assert.equal((await restarted.message('text:export', {scope: 'local'})).text, words.join('\n') + '\n');
+  assert.equal((await restarted.message('view', {account: 'other'})).localWords.length, 0);
+  await restarted.message('text:import', {text: 'LOCAL PHRASE 4999\nnew local word'});
+  await restarted.message('local:apply');
+  assert.equal(restarted.store().accounts.tester.localWords.length, 5001);
+  const first = restarted.store().accounts.tester.localWords[0];
+  await restarted.message('local:remove', {id: first.id});
+  assert.equal(restarted.store().accounts.tester.localWords.length, 5000);
+  assert.equal(restarted.store().accounts.tester.localWords.some(word => word.id === first.id), false);
+});
+test('local Apply releases an interrupted native batch and cancels its retries', async () => {
+  const h = harness();
+  await h.message('text:import', {text: 'first\nsecond'}); await h.message('apply');
+  await h.runner('runner:failed', {error: 'Native limit reached'});
+  await h.message('local:apply');
+  assert.equal(h.store().job.status, 'stopped');
+  assert.equal(h.alarms.size, 0);
+  assert.deepEqual(h.store().accounts.tester.localWords.map(word => word.text), ['first', 'second']);
+  await h.message('add', {text: 'third'});
+  assert.equal(h.store().accounts.tester.bag.length, 1);
+});
+test('upgrade retains known native words, pending words, and interrupted batch entries only once', async () => {
+  const job = C.createJob('tester', [C.entry('old success'), C.entry('pending')], C.DEFAULTS, 1);
+  job.status = 'paused'; job.pauseReason = 'user';
+  const h = harness({session: {}, local: {xMuteBag: {version: 1, accounts: {tester: {
+    bag: [C.entry('pending')], options: {...C.DEFAULTS},
+    filter: {enabled: true, terms: [{text: 'native', validUntil: 1}, {text: 'expired', expiresAt: 1}], syncedAt: 1},
+  }}, job}}});
+  assert.deepEqual((await h.message('view')).localWords.map(word => word.text), ['native', 'old success', 'pending']);
+  const word = h.store().accounts.tester.localWords[0];
+  await h.message('local:remove', {id: word.id});
+  assert.equal((await harness(h.backing).message('view')).localWords.some(item => item.text === 'native'), false);
+});
 test('bulk imports merge atomically, serialize with other edits, persist and isolate accounts', async () => {
   const h = harness();
   const results = await Promise.all([

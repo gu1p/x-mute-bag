@@ -342,7 +342,7 @@ async function mountHarness(sources, fixture) {
       el('audience').value = 'unfollowed'; el('audience').dispatchEvent(new (win().Event)('change')); await sleep(100);
       el('duration').value = '7d'; el('duration').dispatchEvent(new (win().Event)('change')); await sleep(100);
       win().scrollTo(0, 100); const scroll = win().scrollY;
-      await click('apply');
+      await click('mute-on-x');
       await until(() => store().job?.status === 'complete', 'batch complete', 25000);
       assert(store().job.items.map(i => i.status).join(',') === 'skipped,added,added', 'confirmed results');
       assert(model.saves.length === 2, 'one save per new entry');
@@ -405,7 +405,7 @@ async function mountHarness(sources, fixture) {
       await click('clear');
       await pick('Alice'); await pick('Cooper', true, false, false);
       const savesBefore = model.saves.length;
-      await click('apply');
+      await click('mute-on-x');
       await until(() => store().job.status === 'complete', 'saving picked expression', 25000);
       assert(model.saves.length === savesBefore + 1 && model.saves.at(-1).text === 'Alice Cooper', 'one expression produces one native save');
       assert(!bag().length, 'saved expression leaves the bag');
@@ -416,13 +416,13 @@ async function mountHarness(sources, fixture) {
     async failures() {
       model.fail = 'fail word';
       await add('first success'); await add('fail word'); await add('last pending');
-      await click('apply'); await until(() => store().job.status === 'retrying', 'failure', 25000);
+      await click('mute-on-x'); await until(() => store().job.status === 'retrying', 'failure', 25000);
       assert(bag().map(i => i.text).join(',') === 'fail word,last pending', 'pending bag retained');
       model.fail = null;
       await command('Retry now'); await until(() => store().job.status === 'complete', 'retry', 25000);
       assert(model.saves.filter(s => s.text === 'first success').length === 1, 'confirmed save never repeated');
       model.uncertain = 'uncertain';
-      await add('uncertain'); await click('apply'); await until(() => store().job.status === 'retrying', 'uncertain', 25000);
+      await add('uncertain'); await click('mute-on-x'); await until(() => store().job.status === 'retrying', 'uncertain', 25000);
       await command('Retry now'); await until(() => store().job.status === 'complete', 'reconcile', 25000);
       assert(model.saves.filter(s => s.text === 'uncertain').length === 1, 'uncertain save never repeated');
       model.uncertain = null;
@@ -431,7 +431,7 @@ async function mountHarness(sources, fixture) {
     },
     async stopAndAccount() {
       model.saveDelay = 1000;
-      await add('stop first'); await add('stop second'); await click('apply');
+      await add('stop first'); await add('stop second'); await click('mute-on-x');
       await until(() => model.saves.some(s => s.text === 'stop first'), 'saving');
       await command('Stop'); await sleep(1300);
       assert(store().job.status === 'paused' && !model.saves.some(s => s.text === 'stop second'), 'Stop prevents next save');
@@ -439,7 +439,7 @@ async function mountHarness(sources, fixture) {
       await command('Resume / retry'); await until(() => store().job.status === 'complete', 'closed tab resume', 25000);
       assert(model.saves.filter(s => s.text === 'stop first').length === 1, 'resume reconciles in-flight save');
       model.account = 'different';
-      await add('account guard'); await click('apply'); await until(() => store().job.status === 'retrying', 'account guard', 25000);
+      await add('account guard'); await click('mute-on-x'); await until(() => store().job.status === 'retrying', 'account guard', 25000);
       assert(!model.saves.some(s => s.text === 'account guard'), 'no save under different account');
       model.account = 'tester'; await command('End batch');
       assert(!errors.length, 'no JavaScript errors: ' + errors.join(','));

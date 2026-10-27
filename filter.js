@@ -5,8 +5,8 @@
   const C = XMuteCore, X = XMuteX;
   let account = null, data = null, syncing = false, loading = null, requestingSync = false;
   let timer = null, inspecting = false, imported = '', hidden = new Set(), hiddenCount = 0;
-  let lastStatus = '', matcher = () => false, matcherUntil = 0;
-  let replyRules = [];
+  let lastStatus = '', matcher = () => false, matcherUntil = 0, matcherSignature = '', wordCount = 0;
+  let replyRules = [], localWords = [];
   const listeners = new Set();
   const style = document.createElement('style');
   style.textContent = '[data-xmb-filtered="true"]{display:none!important}';
@@ -16,10 +16,8 @@
     if (!reply?.ok) throw new Error(reply?.error || 'Refresh X after reloading the extension.');
     return reply.value;
   }
-  const alive = term => (term.expiresAt == null || term.expiresAt > Date.now()) &&
-    (term.validUntil == null || term.validUntil > Date.now());
   function status() {
-    return {enabled: data?.enabled ?? true, words: data?.terms.filter(alive).length || 0,
+    return {enabled: data?.enabled ?? true, words: wordCount, local: localWords.length,
       hidden: hiddenCount, replies: replyRules.filter(rule => rule.enabled).length,
       syncing, synced: !!data?.syncedAt, error: data?.error || ''};
   }
@@ -29,13 +27,20 @@
     lastStatus = current;
     for (const listener of listeners) listener();
   }
+  function updateMatcher() {
+    const terms = C.filterTerms(data, localWords);
+    const signature = JSON.stringify(terms);
+    if (signature !== matcherSignature) { matcher = C.muteMatcher(terms); matcherSignature = signature; }
+    wordCount = terms.length;
+    const deadlines = terms.flatMap(term => [term.expiresAt, term.validUntil]).filter(time => time > Date.now());
+    matcherUntil = deadlines.length ? Math.min(...deadlines) : Infinity;
+  }
   function accept(value, expected) {
     if (X.account() !== expected) return;
     account = expected; data = value.filter; syncing = value.syncing;
     replyRules = value.replyRules || [];
-    matcher = C.muteMatcher(data.terms);
-    const deadlines = data.terms.flatMap(term => [term.expiresAt, term.validUntil]).filter(time => time > Date.now());
-    matcherUntil = deadlines.length ? Math.min(...deadlines) : Infinity;
+    localWords = value.localWords || [];
+    updateMatcher();
     schedule(); notify();
   }
   async function sync(force = false) {
@@ -69,22 +74,17 @@
   function scan() {
     const current = X.account();
     if (current !== account) {
-      restore(); data = null; account = null; syncing = false; replyRules = [];
+      restore(); data = null; account = null; syncing = false; replyRules = []; localWords = []; updateMatcher();
       if (current) load();
       notify(); return;
     }
     if (!current || !data || /^\/(settings|messages|compose|i\/chat)(\/|$)/.test(location.pathname)) {
       restore(); notify(); return;
     }
-    if (Date.now() >= matcherUntil) {
-      matcher = C.muteMatcher(data.terms);
-      matcherUntil = Infinity;
-      const deadlines = data.terms.flatMap(term => [term.expiresAt, term.validUntil]).filter(time => time > Date.now());
-      if (deadlines.length) matcherUntil = Math.min(...deadlines);
-    }
+    if (Date.now() >= matcherUntil) updateMatcher();
     const next = new Set();
     hiddenCount = 0;
-    const articles = [...document.querySelectorAll('article[data-testid="tweet"]')].filter(article =>
+    const articles = [...document.querySelectorAll('main article[data-testid="tweet"]')].filter(article =>
       !article.parentElement.closest('article[data-testid="tweet"]') && !article.closest('[role="dialog"],[contenteditable="true"]'));
     const replies = X.replyTargets(articles, replyRules);
     for (const article of articles) {
@@ -157,9 +157,9 @@
     if (area !== 'local' || !changes.xMuteBag) return;
     const next = changes.xMuteBag.newValue, expected = X.account();
     const filter = expected && next?.accounts?.[expected]?.filter;
-    if (filter) accept({filter, replyRules: next.accounts[expected].replyRules,
+    if (filter) accept({filter, localWords: next.accounts[expected].localWords, replyRules: next.accounts[expected].replyRules,
       syncing: next.filterSync?.account === expected && next.filterSync.status === 'running'}, expected);
-    else { account = null; data = null; replyRules = []; restore(); schedule(); }
+    else { account = null; data = null; replyRules = []; localWords = []; updateMatcher(); restore(); schedule(); }
   });
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') { schedule(); load(); }

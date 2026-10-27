@@ -1,62 +1,83 @@
 # X Mute Bag
 
-Pick words directly from posts on X, review them in a small bag, and add them to X’s muted words. The extension also hides matching posts itself, including posts quoting muted text, and can hide replies from selected accounts while keeping their original posts.
+Filter posts and quotes on X with your own persistent local word list. Pick words from posts or import one word/expression per line. Local filtering works beyond X’s native mute capacity and does not submit words to X.
 
 ## Install
 
 No build, account, or API key is needed.
 
-1. Open **chrome://extensions** (or **brave://extensions** in Brave).
+1. Open **chrome://extensions** (or **brave://extensions**).
 2. Enable **Developer mode**, choose **Load unpacked**, and select the folder containing `manifest.json`.
-3. Pin **X Mute Bag** from the browser’s Extensions menu.
+3. Pin **X Mute Bag** from the Extensions menu.
 4. Open or refresh **https://x.com/home**, then click the bag icon.
 
-The packaged version is also available in `dist/x-mute-bag.zip`. Extract it and load the extracted folder, not the ZIP. Keep the folder in place while the extension is installed.
+`npm run package` creates `dist/x-mute-bag.zip`. Extract it and load the extracted folder. Keep that folder in place while the extension is installed.
 
-After updating these files, click **Reload** on the extension’s card and refresh open X tabs.
+After updating, **Reload** the extension and refresh open X tabs.
 
-## Use
+## Filter locally
 
-- Click the toolbar icon to start picking. Hover over a tweet word to preview it, then click to add it. Repeated words are collected once.
-- To pick a phrase or full name, click its first word and **Shift-click** its last word in the same post. Holding Shift previews the full range. This replaces the word just picked with one phrase; further Shift-clicks adjust that phrase. You can select forwards or backwards. Independently collected or manually edited entries stay in the bag.
-- Expand or collapse the bag at the top right. Edit entries, remove individual words, or type a complete phrase.
-- The main panel shows your bag and **Apply**. Open **More options** only when you need import/export, mute settings, or timeline filters; each section opens separately. Picking instructions appear while picking, and batch errors and extra actions stay under **Details**.
-- Open **More options → Import words** to paste a list or choose **Load .txt file**. Use one word or complete expression per line, then click **Add lines to bag**. File loading lets you review the text first. Imports merge with your bag; they do not replace it or save to X until you click **Apply**.
-- Imports accept UTF-8 text up to 1 MB, including Windows and macOS line endings. Blank lines are ignored, surrounding/repeated whitespace is cleaned, and duplicates are skipped case-insensitively. Hashtags, usernames, punctuation, and spaces within an expression stay together. Each entry must be at most 280 characters; an invalid line is reported by number and nothing is imported until you fix it.
-- Open **More options → Export words** and use **Copy text** or **Download .txt** to export one entry per line. Choose **Bag only** for pending entries, or **Muted words + bag** for the last synced X muted words plus pending entries, with duplicates removed. Use **Sync muted words** under **Timeline filters** first for an up-to-date backup; the export shows when the list was last synced and excludes known expired mutes. Text exports contain words only, not mute settings or account reply rules. Reimporting uses the bag’s current batch settings when you Apply.
-- Press **Escape** to stop picking. Closing the panel keeps the bag; clicking the toolbar icon reopens it.
-- The default is **forever**, in **Home timeline and notifications from anyone**. Open **More options → Mute settings** to change these options for the entire batch.
-- Click **Apply**. A separate background tab saves entries one at a time, while your original feed stays in place. It uses X’s Add link to keep the app loaded and proceeds as soon as each save is confirmed, without a fixed delay between successful entries. Retry delays apply only after a failure.
-- Words already muted are skipped without changing their settings. Successfully confirmed entries leave the bag.
-- **Hide muted posts, including quotes** runs automatically, even with the bag closed. If a post or any quoted body contains a muted word or phrase, the entire outer post disappears from the page. This also covers tweets loaded while scrolling.
-- Existing X muted words are imported in a temporary background settings tab. **Sync muted words** refreshes the list immediately; the extension also refreshes it automatically about every ten minutes while X is open. Opening X’s muted-word settings imports edits there as well.
-- The local word filter applies to rendered posts across X, including Home, profiles, search, and replies. Its toggle is independent of X’s Home/notification options and uses all imported muted words. Turn it off to restore posts hidden by word matches; X’s own filters and your account rules remain in effect.
-- Under **More options → Timeline filters → Account filters**, enter an **@username** or paste an **X profile link**, then click **Add**. Suggestions include authors on the current page. The rule immediately hides that account’s replies to other accounts from feeds, including attached conversation context. Original posts, quote posts, and self-threads stay visible unless a separate word rule matches them.
-- Each account rule has a checkbox to pause/resume it and an **×** to remove it. Rules are saved locally, separately for each signed-in X account, and work with the panel closed. They do not mute, block, or unfollow anyone on X, and do not require **Apply** or a muted-word sync. Open a post directly to read its conversation without the account reply filter.
-- Failed saves retry automatically, with no attempt limit. Delays start at 30 seconds and increase to a maximum of five minutes per failed entry; successful progress resets the delay. Every retry checks X’s list first, including when an earlier save may have succeeded despite an error. The compact status shows the next attempt; expand **Details** for the error, **Retry now**, **Settings tab**, or **End batch**.
-- **Stop** cancels automatic retries and prevents further saves; a save already in flight may finish. After an intentional Stop, use **Resume / retry** to continue. **End batch** releases the remaining bag for editing. Previously saved words stay muted.
+- Click the toolbar icon, then click words in posts to collect them. Click the first word and **Shift-click** the last word to collect a phrase, including across inline spans. Repeated clicks and imports deduplicate case-insensitively.
+- Type expressions directly into the bag, or open **More options → Import words** to paste text or load a UTF-8 `.txt` file. Use one word or expression per line. Imports merge with the bag for review; they do not change X settings.
+- Click **Filter N words**. The entire bag is saved to the local filter immediately and matching posts disappear. There is no native mute queue or delay between entries. Drafts stay visible until you apply them, so phrase picking is not interrupted by a disappearing post.
+- Saved filters work with the panel closed and after browser restarts. They are permanent until removed, stored separately for each signed-in X account. Native mute settings and cache expiry cannot erase them.
+- Open **More options → Saved filters** to search and remove words. Removing a local rule restores posts unless another local rule, an account rule, or a native X mute still applies. Saved-list search displays up to 50 matches; large bags reveal 100 entries at a time to keep the panel responsive.
+- Open **More options → Timeline filters** to pause word filtering and restore posts hidden by it. Reenable it to hide matches again. X’s own muting and account reply rules remain separate.
+- Press **Escape** to stop picking, or close/collapse the bag. Your drafts and saved filters remain on this device.
 
-Automatic retries work with the panel closed and resume after browser or extension-worker restarts. A closed or unresponsive settings tab is recovered automatically. Use **Stop** to stop a batch, rather than closing its settings tab. Chrome may delay scheduled attempts while the device is asleep or busy. If the signed-in account changes or you are signed out, the extension keeps retrying but never saves for a different account; switch back or sign in to the batch’s original account to let it continue. Bags are stored separately by X handle.
+On upgrade, previously known unexpired native mutes, pending bag entries, and the retained batch are copied into the local list once. This preserves words from interrupted or capacity-limited batches. If a native batch is still retrying, **Filter N words** saves its remaining bag locally and ends that native batch; a save already in flight may finish.
+
+## Matching and page behavior
+
+Matching is case-insensitive, Unicode-aware, and literal: accents and punctuation are preserved, and repeated whitespace is normalized. `cat` matches `cat` and `#cat`, but not `catapult` or `@cat`. An expression stays together; `John Smith` does not match `John Smithson`. A prefix tree shares matching work across large dictionaries, and the matcher is rebuilt only when its rules change or expire.
+
+The extension inspects `main article[data-testid="tweet"]` and reads each `[data-testid="tweetText"]` separately, including quote-card text inside `div[role="link"]`. Inline spans, links, line breaks, and emoji image alternatives contribute to the text. A phrase cannot accidentally span a comment and its quote. If either body matches, the outer `[data-testid="cellInnerDiv"]` is hidden when it contains one post; otherwise only the matching article is hidden.
+
+Posts remain in X’s DOM to avoid breaking its rendering. A mutation observer rechecks new posts, expanded text, and cells recycled while scrolling. Previously hidden cells are restored when their content no longer matches. Composer/editable content, dialogs, settings, messages, and sidebars are excluded. Authors and interface labels are not treated as tweet text.
+
+Only rendered text can be inspected. Text inside pictures and text that X has not loaded cannot be matched. Filtering affects this browser/device; it does not block accounts or change the X mobile app.
+
+## Import and export
+
+Imports accept UTF-8 text up to 1 MB, including Windows/macOS line endings. Blank lines are ignored, surrounding/repeated whitespace is cleaned, and duplicates are skipped. Expressions can contain spaces, hashtags, handles, and punctuation. Each entry is limited to 280 Unicode characters. Invalid imports report the original line number and make no partial changes.
+
+Under **More options → Export words**, choose:
+
+- **Saved local filters** for the permanent local database.
+- **Bag only** for pending drafts.
+- **All words** for local filters, pending drafts, and the last synced nonexpired native mutes, without duplicates.
+
+Use **Copy text** or **Download .txt**. Reimport exported files and click **Filter N words** to restore them. Exports contain words only, not native mute settings or account reply rules. **Sync muted words** under Timeline filters refreshes the native portion of an All words export.
+
+## Optional native X muting
+
+**More options → Mute on X (optional) → Mute bag on X** also submits your bag through X’s normal English settings interface. It saves a local copy first, so every entry still filters locally even when X rejects further native mutes. X’s native capacity and restrictions still apply.
+
+Native options default to forever, Home timeline, and notifications from anyone. These settings affect native X muting only; saved local filters remain permanent. A separate background tab saves sequentially using X’s Add link. There is no fixed wait between successful entries. Existing native words are skipped, confirmed entries leave the bag, and your feed stays in place.
+
+Failed native saves retry indefinitely, starting after 30 seconds and backing off to five minutes. Each retry checks the list before resubmitting an uncertain save. Retries recover from closed/stalled tabs and browser restarts. Account changes or sign-out prevent saves until the original account is restored. Chrome can delay attempts while asleep or busy.
+
+**Stop** cancels retries; **Resume / retry** restarts an intentional stop. Under batch **Details**, use **Retry now**, **Settings tab**, or **End batch**. End releases pending entries for editing. **Filter N words** switches the remaining bag to local filtering and ends native retries. Already saved native words stay muted.
+
+Native muted words are also cached for local filtering and refreshed about every ten minutes while X is open. This temporary cache expires after fifteen minutes without a refresh; saved local filters do not expire. Native unmuting affects the native cache, while a separately saved local rule remains until you remove it.
+
+## Account reply filters
+
+Under **More options → Timeline filters → Account filters**, enter an `@username` or X profile link to hide that account’s replies to other accounts. Original posts, quote posts, and self-threads remain visible unless a word rule matches them. Rules apply immediately on this device and do not mute, block, or unfollow anyone on X.
+
+Reply detection uses English reply metadata or connected avatar lines between adjacent timeline cells. Context needed by another visible reply is preserved. Ambiguous posts remain visible, and directly opened conversations stay readable. Each rule can be paused or removed separately.
 
 ## Compatibility and privacy
 
-Current desktop Chrome/Chromium; Manifest V3, Chrome 120 or newer. X’s settings must be in English for this version. Tweet words support Unicode and multilingual text.
+Desktop Chrome/Chromium 120 or newer; Manifest V3. Local word matching supports multilingual text. Optional native settings automation and reply metadata detection expect X’s English interface.
 
-Only tweet bodies are selectable, including replies and quotes. Image text, author names, menus, and composer fields are excluded. Pick phrases with Shift-click within one tweet body, or enter and edit them in the bag.
+The extension does not call undocumented X endpoints, read cookies, send post content to a server, use analytics, or require an API key. Drafts, saved local words, preferences, batch state, native mute cache, and reply rules stay in **chrome.storage.local**, keyed by X handle. Chrome sync is not used. Uninstalling or clearing extension data removes this database; export it for backup.
 
-The extension uses X’s normal settings interface. It does not call undocumented X endpoints, read cookies, send tweet content to a server, or require an API key. The local bag, preferences, batch state, muted-word cache, and account reply rules are stored per X handle in **chrome.storage.local**, the extension’s local data store. Chrome sync is not used. Account rules remain until you disable or remove them; clearing extension data or uninstalling removes them. Its permissions are `storage`, `scripting`, `alarms` (for automatic retries and stalled-tab recovery), and `https://x.com/*`.
+Permissions: `storage`, `scripting`, `alarms` for native retry recovery, and access to `https://x.com/*`.
 
-Matching is case-insensitive, respects word boundaries, and treats a selected expression as one phrase. For example, `cat` matches `cat` and `#cat`, but not `catapult`; `John Smith` does not match `John Smithson`. Quote bodies are checked separately, so a phrase cannot accidentally span two different posts. Hidden cells remain in X’s DOM to avoid disrupting its rendering and are restored if X reuses them for unrelated tweets.
+## Development and verification
 
-Only rendered posts are inspected. The word filter cannot read text inside pictures or inside a quote X has not loaded. Unmuting elsewhere is reflected on the next sync. Durations set through the extension are tracked locally; imported timed mutes follow the refreshed native list. Cached muted words stop being used after fifteen minutes without a successful refresh, so a failed sync cannot keep hiding unmuted content indefinitely. Account reply rules do not expire with this cache.
-
-Reply detection uses X’s English reply metadata or the avatar connector lines between adjacent timeline cells. It only hides parent context when the filtered reply ends that connected conversation item; context needed by a visible downstream reply stays. If the parent/recipient cannot be identified, or X changes the layout, the post stays visible rather than treating an original post as a reply. This includes a reply whose parent has already scrolled out of X’s rendered DOM and which has no recipient label. Quoted reply metadata does not classify the outer post as a reply.
-
-X may change its interface. When required controls cannot be recognized or a save cannot be confirmed, the batch keeps retrying without guessing at controls or marking the entry saved. Expand batch **Details → Settings tab** to inspect X’s message; use **Stop** or **End batch** if an entry needs correction. X’s own muting behavior still applies; search results can contain muted terms.
-
-## Development and checks
-
-The runtime is plain JavaScript and CSS with no build step or runtime dependencies. `core.js` provides normalization, matching and queue helpers; `background.js` owns persisted state and tabs; `x-adapter.js` isolates X’s DOM assumptions; `filter.js` watches the timeline and syncs mute rules; `content.js` owns the picker, panel, and form driver.
+Runtime files are plain JavaScript/CSS with no build step or runtime dependencies. `core.js` owns normalization, dictionary matching, and queue helpers; `background.js` owns persisted state and native tabs; `x-adapter.js` isolates X’s DOM structure; `filter.js` watches posts; `content.js` owns the panel, picker, and native form driver.
 
 ```sh
 npm ci
@@ -65,28 +86,19 @@ npm run check
 npm run package
 ```
 
-Unit and worker tests can run without installing dependencies:
+Unit/worker checks need no dependencies:
 
 ```sh
 node --test tests/core.test.cjs tests/background.test.cjs
 ```
 
-Browser tests load the real unpacked extension in a fresh Chromium profile and route X to a local HTTPS fixture server, including the first navigation of extension-created tabs. Other hostnames are blocked in that test browser. They never access a signed-in X account. OpenSSL must be available to generate a temporary test certificate; no certificate is installed in your system trust store. To use an existing compatible Chromium executable, set `XMB_BROWSER`; set `XMB_HEADED=1` for a visible window.
+Browser checks load the actual unpacked extension in fresh Chromium profiles. A local HTTPS fixture server receives all X traffic, including extension-created tabs; other hostnames are blocked. They do not access a signed-in X account. OpenSSL generates a temporary test certificate without installing it in system trust. Set `XMB_BROWSER` to use an existing compatible executable, or `XMB_HEADED=1` for the main browser suite’s visible window.
 
-For an environment where browser launch is restricted, `node tests/mcp-harness.cjs` builds `artifacts/mcp-harness.js`. Evaluate that script in a blank Chrome MCP test page, then call `XMBTest.replies()`, `XMBTest.filtering()`, `XMBTest.selection()`, `XMBTest.phrases()`, `XMBTest.apply()`, `XMBTest.failures()`, and `XMBTest.stopAndAccount()`. This harness runs the unchanged production scripts with simulated Chrome APIs and X responses; it does not replace testing extension installation.
+- Core/worker tests cover 10,000-term matching, 5,000-word local storage, migration, persistence, account isolation, native sync independence, imports/exports, native checkpoints, automatic retries, and cancellation.
+- `tests/local-filter.cjs` exercises 5,002 local words with 200 native mutes already present, whole-post/quote hiding, Unicode and emoji, false positives, editable exclusions, new/recycled cells, disabling, removal, native sync, exports, reloads, and account switching. It verifies that local filtering never submits a native save.
+- `tests/browser.cjs` covers the picker, phrase editing, native muting/retry controls, account reply filters, text import/export, and progressive disclosure.
+- `tests/batch-speed.cjs` checks native navigation and reports fixture save timing. It covers delayed lists and same-document route changes without false retry delays. Fixture timings measure extension overhead, not live X server latency.
 
-`node tests/live-preview.cjs` builds a temporary picker preview for a disposable live X tab. Its bridge rejects Apply, and its bag is held only in memory. Close that tab after inspection.
+Chrome MCP inspection of live X confirmed the article, text-block, quote-card, and outer-cell structure used by the local fixtures. A reversible live DOM check hid the whole quote-containing cell while keeping the article connected, then restored it. No native settings were changed, and no live post text or account data is included in the fixtures.
 
-Regenerate the included icons with `node scripts/icons.cjs`. Package only runtime files and this guide with `npm run package`.
-
-## Verification in this workspace
-
-- Unit and worker checks cover Unicode normalization, duplicates, phrase editing, text import validation and export round trips, queue checkpoints, origin/tab checks (including route changes without document reloads), concurrent requests, unlimited retries with capped delays, stalled/closed tabs, stale callbacks, Stop/End cancellation, uncertain saves, and worker/browser restarts.
-- Chrome MCP fixture checks cover actual DOM ranges and highlights, Shift-click phrases and full names, reverse ranges, rapidly repeated clicks, dynamically loaded tweets, controlled inputs, sequential saves, options, partial failures, retries, closed tabs, and account changes.
-- Live X checks verified three clickable words and highlights, unchanged feed navigation, all English form controls, muted-list recognition, and a temporary draft value accepted by React. The draft was restored without clicking Save.
-- Live X Shift-click checks confirmed that a multiword range becomes one highlighted bag entry without navigating away or saving account settings.
-- Filtering checks cover native mute import, hiding the whole outer quoted post, Unicode/phrase boundaries, new and recycled feed cells, toggling, account isolation, persistence, native unmuting, and stale cache expiry.
-- Live X filtering checks confirmed that a match found only in quoted text hides the whole outer timeline cell, preserves X’s DOM and navigation, and is restored when the filter is switched off. These checks used a temporary local rule and did not change account settings.
-- Account rule checks cover store migration, duplicate handles, persistence, account isolation, connected parents, original posts, self-threads, quoted metadata, missing or conflicting parent context, recycled authors, new replies, direct conversations, pause/removal, and independence from word-cache expiry. A live X check hid a reply and its connected parent, left an unrelated reply visible, and restored both cells when the temporary rule was removed.
-- The full unpacked-extension Chromium suite passes against local HTTPS fixtures. It covers the compact panel and progressive disclosure, a real 30-second automatic retry with the panel closed, uncertain-save reconciliation, Stop cancellation, account-change recovery, paste and file imports, invalid encodings and oversized files, duplicate counts, clipboard and downloaded exports, export scopes, reimporting, persistence, and the existing picker, Apply, and filtering flows. These checks do not save to a real X account.
-- `node tests/batch-speed.cjs` measures eight sequential saves against a local fixture, checks that native navigation needs only one document load, and verifies delayed-list duplicate detection and Save redirects that leave Chrome’s sender document URL stale. Fixture timings measure extension overhead, not live X server latency.
+`node tests/mcp-harness.cjs` builds `artifacts/mcp-harness.js` for a blank Chrome MCP page when Chromium launch is restricted. `node tests/live-preview.cjs` builds an in-memory picker preview that rejects native writes. Temporary files under `artifacts/` and generated packages under `dist/` are ignored by Git.

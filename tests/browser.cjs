@@ -93,7 +93,9 @@ async function until(probe, label, timeout = 15000) {
     }
     async function apply(count) {
       const previous = (await store()).job?.id;
-      await panel.getByRole('button', {name: 'Apply ' + count + ' muted ' + (count === 1 ? 'word' : 'words'), exact: true}).click();
+      assert.equal((await store()).accounts.tester.bag.length, count);
+      await reveal('mute-options');
+      await panel.getByRole('button', {name: 'Mute bag on X', exact: true}).click();
       await until(async () => {
         const job = (await store()).job;
         return job && job.id !== previous;
@@ -188,7 +190,7 @@ async function until(probe, label, timeout = 15000) {
     assert.deepEqual((await store()).accounts.tester.bag.map(i => i.text), ['fail word', 'last pending']);
     await until(async () => (await panel.locator('#status-text').textContent()).includes('Retrying automatically'), 'automatic retry status');
     assert.equal(await panel.locator('#status-error').isVisible(), false, 'error detail stays collapsed');
-    assert.equal(await panel.getByRole('button', {name: 'Apply 2 muted words', exact: true}).isDisabled(), true);
+    assert.equal(await panel.getByRole('button', {name: 'Mute bag on X', exact: true}).isDisabled(), true);
     assert.equal(await worker.evaluate(async () => !!await chrome.alarms.get('xmb-batch')), true);
     await panel.getByRole('button', {name: 'Close bag', exact: true}).click();
     model.fail = null;
@@ -371,8 +373,10 @@ async function until(probe, label, timeout = 15000) {
     assert.equal(await page.evaluate(() => navigator.clipboard.readText()), exported);
     await panel.getByLabel('Export source', {exact: true}).selectOption('all');
     await panel.getByRole('button', {name: 'Copy text', exact: true}).click();
-    await until(async () => (await exportStatus.textContent()) === '6 entries copied.', 'muted words and bag export');
-    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'spoiler\n' + exported);
+    const saved = (await store()).accounts.tester.localWords.map(word => word.text);
+    const expectedAll = [...new Set(['spoiler', ...saved, ...exported.trim().split('\n')])].join('\n') + '\n';
+    await until(async () => (await exportStatus.textContent()) === expectedAll.trim().split('\n').length + ' entries copied.', 'all words export');
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), expectedAll);
     await panel.getByRole('button', {name: 'Clear bag', exact: true}).click();
     await panel.locator('#import-file').setInputFiles({name: download.suggestedFilename(), mimeType: 'text/plain', buffer: Buffer.from(exported)});
     await until(async () => (await transferStatus.textContent()).includes('loaded.'), 'load exported text');
