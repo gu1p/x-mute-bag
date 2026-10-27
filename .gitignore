@@ -2,3 +2,10 @@ node_modules/
 artifacts/
 dist/
 .DS_Store
+.env
+.env.*
+.local/
+.aws/
+*.pem
+*.key
+*.p12

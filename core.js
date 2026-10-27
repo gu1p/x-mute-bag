@@ -4,6 +4,7 @@
   const DEFAULTS = Object.freeze({home: true, notifications: true, audience: 'anyone', duration: 'forever'});
   const FILTER_SYNC_MS = 10 * 60 * 1000;
   const FILTER_CACHE_MS = 15 * 60 * 1000;
+  const TEXT_LIMIT = 1024 * 1024;
   const clean = text => String(text ?? '').normalize('NFC').trim().replace(/\s+/gu, ' ');
   const key = text => clean(text).toLowerCase();
   const accountKey = value => {
@@ -28,6 +29,34 @@
   function add(bag, text) {
     const next = entry(text);
     return bag.some(item => item.key === next.key) ? bag : [...bag, next];
+  }
+  function importText(bag, text) {
+    if (typeof text !== 'string') throw new Error('Paste text or choose a UTF-8 text file.');
+    if (new TextEncoder().encode(text).length > TEXT_LIMIT) throw new Error('Keep imports to 1 MB of UTF-8 text or less.');
+    const next = [...bag], seen = new Set(bag.map(item => item.key));
+    let duplicates = 0, lines = 0;
+    for (const [index, line] of text.split(/\r\n|[\n\r\u2028\u2029]/u).entries()) {
+      if (!clean(line)) continue;
+      let item;
+      try {
+        if (line.includes('\0')) throw new Error('Use valid UTF-8 text.');
+        item = entry(line);
+      } catch (error) { throw new Error('Line ' + (index + 1) + ': ' + error.message); }
+      lines++;
+      if (seen.has(item.key)) { duplicates++; continue; }
+      seen.add(item.key);
+      next.push(item);
+    }
+    if (!lines) throw new Error('Enter at least one word or expression, one per line.');
+    return {bag: next, added: next.length - bag.length, duplicates};
+  }
+  function exportText(entries) {
+    const unique = new Map();
+    for (const item of entries) {
+      const text = clean(item.text), normalized = key(text);
+      if (text && !unique.has(normalized)) unique.set(normalized, text);
+    }
+    return {text: unique.size ? [...unique.values()].join('\n') + '\n' : '', count: unique.size};
   }
   function edit(bag, id, text) {
     const next = entry(text, id);
@@ -105,7 +134,7 @@
     if (!/^[a-zA-Z0-9_]{1,15}$/.test(handle)) throw new Error('Enter an X @username or profile link.');
     return handle.toLowerCase();
   }
-  const api = {DEFAULTS, FILTER_SYNC_MS, FILTER_CACHE_MS, clean, key, accountKey, userHandle, entry, options, add, edit, pick, tokens, createJob, finishItem, counts, muteDeadline, muteMatcher};
+  const api = {DEFAULTS, FILTER_SYNC_MS, FILTER_CACHE_MS, TEXT_LIMIT, clean, key, accountKey, userHandle, entry, options, add, importText, exportText, edit, pick, tokens, createJob, finishItem, counts, muteDeadline, muteMatcher};
   globalThis.XMuteCore = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

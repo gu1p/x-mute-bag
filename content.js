@@ -8,6 +8,7 @@
   let records = [], hover = null, refreshFrame = 0, refreshTimer = 0;
   let anchor = null, shiftHeld = false, pickGeneration = 0, pickQueue = Promise.resolve();
   let runnerBusy = false, cancelledJob = null, notice = '';
+  let transferBusy = false;
   const locked = () => ['running', 'paused'].includes(state?.job?.status);
   async function request(type, fields = {}) {
     const reply = await chrome.runtime.sendMessage({type, account: X.account(), ...fields});
@@ -20,6 +21,7 @@
       state = null;
       if (visible) setNotice('Open X and sign in to pick words.');
       setPicking(false);
+      render();
       return;
     }
     if (state && state.account !== account) setPicking(false);
@@ -35,6 +37,7 @@
   async function action(type, fields = {}) {
     try {
       const next = await request(type, fields);
+      if (next.account !== X.account()) { await refresh(); return false; }
       state = next;
       if (type === 'clear') anchor = null;
       setNotice('');
@@ -42,6 +45,58 @@
       scheduleRanges();
       return next;
     } catch (error) { setNotice(error.message); return false; }
+  }
+  function transferStatus(message, error = false) {
+    const box = shadow.getElementById('transfer-status');
+    box.textContent = message;
+    box.className = error ? 'notice' : 'hint';
+  }
+  function renderTransfer() {
+    const $ = id => shadow.getElementById(id);
+    const account = X.account();
+    const available = !!state && state.account === account;
+    if ($('transfer').dataset.account !== (account || '')) {
+      $('transfer').dataset.account = account || '';
+      $('import-text').value = '';
+      $('import-file').value = '';
+      transferStatus('');
+    }
+    const disabled = !available || locked() || transferBusy;
+    $('import-text').disabled = disabled;
+    $('load-text').disabled = disabled;
+    $('import-file').disabled = disabled;
+    $('import-text-button').disabled = disabled || !$('import-text').value.trim();
+    for (const id of ['export-scope', 'copy-text', 'download-text']) $(id).disabled = !available || transferBusy;
+    const syncedAt = available && state.filter?.syncedAt;
+    $('export-hint').textContent = $('export-scope').value === 'bag' ? 'Export the words and expressions currently in your bag.' :
+      (syncedAt ? 'Muted words last synced ' + new Date(syncedAt).toLocaleString() + '. ' : 'Muted words have not been synced yet. ') +
+      'Use Sync muted words below for the latest list.';
+  }
+  async function exportWords(copy) {
+    if (transferBusy || !state || state.account !== X.account()) return;
+    const account = state.account, scope = shadow.getElementById('export-scope').value;
+    transferBusy = true; renderTransfer();
+    try {
+      await pickQueue;
+      if (X.account() !== account) throw new Error('The X account changed. Try exporting again.');
+      const result = await request('text:export', {account, scope});
+      if (X.account() !== account) throw new Error('The X account changed. Try exporting again.');
+      if (!result.count) throw new Error('No words to export. Add entries or sync muted words first.');
+      if (copy) {
+        try { await navigator.clipboard.writeText(result.text); }
+        catch { throw new Error('Could not copy text. Use Download .txt to export your words.'); }
+      } else {
+        const url = URL.createObjectURL(new Blob([result.text], {type: 'text/plain;charset=utf-8'}));
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = 'x-mute-bag-' + account + '-' + scope + '.txt';
+        shadow.append(link);
+        link.click(); link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+      transferStatus(result.count + (result.count === 1 ? ' entry ' : ' entries ') + (copy ? 'copied.' : 'exported.'));
+    } catch (error) { transferStatus(error.message, true); }
+    finally { transferBusy = false; renderTransfer(); }
   }
   function createPanel() {
     if (host) return;
@@ -56,13 +111,13 @@
       '.panel{font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;width:min(354px,calc(100vw - 32px));background:#151b24;color:#e8edf2;border:1px solid #344052;border-radius:18px;box-shadow:0 18px 60px #0006;overflow:hidden}',
       'header{display:flex;align-items:center;gap:10px;padding:15px 16px} .mark{display:grid;place-items:center;width:31px;height:31px;border-radius:10px;background:#b8f4da;color:#183f32;font-size:19px;font-weight:800}',
       'h2{margin:0;font-size:15px;letter-spacing:-.2px} .identity{font-size:11px;color:#a0adbe} .heading{flex:1}',
-      'button,input,select{font:inherit} button{cursor:pointer;border:1px solid #465368;border-radius:9px;background:transparent;color:inherit;padding:7px 10px} button:hover{background:#ffffff12} button:disabled{opacity:.42;cursor:default}',
-      'button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible{outline:2px solid #79ddba;outline-offset:3px}',
+      'button,input,select,textarea{font:inherit} button{cursor:pointer;border:1px solid #465368;border-radius:9px;background:transparent;color:inherit;padding:7px 10px} button:hover{background:#ffffff12} button:disabled{opacity:.42;cursor:default}',
+      'button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid #79ddba;outline-offset:3px}',
       '.icon{padding:4px 8px;border:0;font-size:18px}.body{border-top:1px solid #344052;padding:14px 16px;max-height:calc(100vh - 105px);overflow:auto}',
       '.pick{width:100%;text-align:left;border-color:#466b60;background:#b8f4da0c}.pick[aria-pressed=true]{border-color:#8fe4c0;color:#b8f4da}.hint{color:#a0adbe;font-size:12px;margin:8px 0 12px}',
       '.empty{border:1px dashed #465368;border-radius:10px;padding:18px 12px;color:#a0adbe;text-align:center;font-size:12px}',
       '.entries{list-style:none;padding:0;margin:0;display:grid;gap:6px;max-height:224px;overflow:auto}.entry{display:flex;gap:6px;align-items:center}',
-      'input[type=text],select{min-width:0;background:#0e141c;border:1px solid #465368;border-radius:8px;color:inherit;padding:8px 9px} .entry input{width:100%}.entry button{border:0;padding:7px}.entry input:disabled{opacity:.7}',
+      'input[type=text],select,textarea{min-width:0;background:#0e141c;border:1px solid #465368;border-radius:8px;color:inherit;padding:8px 9px} .entry input{width:100%}.entry button{border:0;padding:7px}.entry input:disabled{opacity:.7}',
       '.add{display:flex;gap:7px;margin-top:10px}.add input{flex:1;width:100%}.add button{padding:7px 12px}',
       '.tools{display:flex;justify-content:space-between;align-items:center;margin:10px 0;color:#a0adbe;font-size:12px}.tools button{border:0;padding:2px 0;font-size:12px;text-decoration:underline}',
       '.filter{border-top:1px solid #344052;margin-top:12px;padding-top:12px;font-size:12px}.filter label{display:flex;align-items:center;gap:6px}.filter button{font-size:12px;margin-top:8px}.filter p{margin:7px 0;color:#a0adbe}',
@@ -71,9 +126,10 @@
       '.apply{margin-top:14px;width:100%;background:#b8f4da;color:#163d2f;border-color:#b8f4da;font-weight:700;padding:10px}.apply:hover{background:#9ee6c8}',
       '.status{margin:12px 0 0;padding:10px 12px;background:#ffffff08;border-radius:10px;font-size:12px;overflow-wrap:anywhere}.progress{height:4px;background:#344052;border-radius:3px;margin:9px 0}.bar{height:100%;background:#8fe4c0;border-radius:3px;transition:width .2s}',
       '.batch-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}.batch-actions button{font-size:12px;padding:5px 9px}.notice{font-size:12px;color:#ffd5b5;margin:10px 0 0;overflow-wrap:anywhere}',
+      '.transfer summary{color:inherit;font-weight:600}.transfer textarea{display:block;width:100%;resize:vertical;min-height:100px;max-height:240px;font-size:12px}.transfer .export-label{display:grid;gap:6px;margin-top:14px;font-size:12px}.transfer select{width:100%;font-size:12px}.transfer p{overflow-wrap:anywhere}',
       ':host([data-light]) .panel{background:#fff;color:#162521;border-color:#d5dfda;box-shadow:0 14px 60px #10271c22}:host([data-light]) .body,:host([data-light]) details{border-color:#d5dfda}',
       ':host([data-light]) .identity,:host([data-light]) .hint,:host([data-light]) summary,:host([data-light]) .tools,:host([data-light]) .empty{color:#596c63}',
-      ':host([data-light]) input[type=text],:host([data-light]) select{background:#f5f8f6;border-color:#c4d0c9}:host([data-light]) button{border-color:#c4d0c9}:host([data-light]) button:hover{background:#00000009}',
+      ':host([data-light]) input[type=text],:host([data-light]) select,:host([data-light]) textarea{background:#f5f8f6;border-color:#c4d0c9}:host([data-light]) button{border-color:#c4d0c9}:host([data-light]) button:hover{background:#00000009}',
       ':host([data-light]) .pick[aria-pressed=true]{color:#146448;border-color:#258665;background:#edf9f2}:host([data-light]) .apply{background:#175e46;color:white}:host([data-light]) .status{background:#f0f5f2}:host([data-light]) .notice{color:#964314}',
       '</style>',
       '<section class="panel" aria-label="X Mute Bag">',
@@ -84,6 +140,17 @@
       '<div class="empty" id="empty">A quieter timeline starts with a word.</div><ul class="entries" id="entries" aria-label="Collected words"></ul>',
       '<form class="add" id="add-form"><input id="new-word" type="text" aria-label="Add a word or phrase" placeholder="Add a word or phrase…" maxlength="560" autocomplete="off"><button id="add" type="submit" aria-label="Add entry">+</button></form>',
       '<div class="tools"><span id="bag-info">Saved on this device</span><button id="clear">Clear bag</button></div>',
+      '<details class="transfer" id="transfer"><summary>Import / export words</summary>',
+      '<p class="hint" id="import-hint">Paste text or load a UTF-8 .txt file (up to 1 MB). One word or expression per line. Blank lines and duplicates are skipped.</p>',
+      '<textarea id="import-text" aria-label="Words to import" aria-describedby="import-hint" rows="5" placeholder="spoiler&#10;John Smith&#10;another expression" spellcheck="false"></textarea>',
+      '<input id="import-file" type="file" accept=".txt,text/plain" aria-label="Import text file" hidden>',
+      '<div class="batch-actions"><button id="load-text">Load .txt file</button><button id="import-text-button">Add lines to bag</button></div>',
+      '<p class="hint">Review imported entries in your bag, then click Apply to mute them on X.</p>',
+      '<p class="hint" id="transfer-status" role="status" aria-live="polite"></p>',
+      '<label class="export-label">Export<select id="export-scope" aria-label="Export source"><option value="all">Muted words + bag</option><option value="bag">Bag only</option></select></label>',
+      '<p class="hint" id="export-hint"></p><div class="batch-actions"><button id="copy-text">Copy text</button><button id="download-text">Download .txt</button></div>',
+      '<p class="hint">Text exports contain words only. Mute settings and account reply rules are not included.</p>',
+      '</details>',
       '<details><summary id="summary">Forever · Home + notifications</summary><div class="options">',
       '<label><input type="checkbox" id="home">Home timeline</label><label><input type="checkbox" id="notifications">Notifications</label>',
       '<label>From<select id="audience" aria-label="Notification audience"><option value="anyone">Anyone</option><option value="unfollowed">People you don’t follow</option></select></label>',
@@ -102,6 +169,41 @@
     $('collapse').onclick = () => { collapsed = !collapsed; render(); };
     $('pick').onclick = () => setPicking(!active);
     $('clear').onclick = () => action('clear');
+    $('import-text').oninput = () => { transferStatus(''); renderTransfer(); };
+    $('export-scope').onchange = () => { transferStatus(''); renderTransfer(); };
+    $('load-text').onclick = () => $('import-file').click();
+    $('import-file').onchange = async () => {
+      const file = $('import-file').files[0], account = X.account();
+      $('import-file').value = '';
+      if (!file || transferBusy) return;
+      transferBusy = true; renderTransfer();
+      try {
+        if (file.size > C.TEXT_LIMIT) throw new Error('Keep imports to 1 MB of UTF-8 text or less.');
+        let text;
+        try { text = new TextDecoder('utf-8', {fatal: true}).decode(await file.arrayBuffer()); }
+        catch { throw new Error('Could not read this file. Choose a UTF-8 text file.'); }
+        if (X.account() !== account) throw new Error('The X account changed. Load the file again.');
+        $('import-text').value = text;
+        transferStatus(file.name + ' loaded. Review the text, then add it to your bag.');
+      } catch (error) { transferStatus(error.message, true); }
+      finally { transferBusy = false; renderTransfer(); }
+    };
+    $('import-text-button').onclick = async () => {
+      if (transferBusy || locked() || !state || state.account !== X.account()) return;
+      const text = $('import-text').value, account = state.account;
+      transferBusy = true; renderTransfer();
+      try {
+        await pickQueue;
+        if (X.account() !== account) throw new Error('The X account changed. Try importing again.');
+        const result = await action('text:import', {text, account});
+        if (!result) { transferStatus(notice || 'The X account changed. Try importing again.', true); setNotice(''); return; }
+        $('import-text').value = '';
+        transferStatus(result.imported.added + ' added to bag · ' + result.imported.duplicates + ' duplicates skipped. Review your bag, then Apply.');
+      } catch (error) { transferStatus(error.message, true); }
+      finally { transferBusy = false; renderTransfer(); }
+    };
+    $('copy-text').onclick = () => exportWords(true);
+    $('download-text').onclick = () => exportWords(false);
     $('filter-enabled').onchange = () => XMuteTimeline.setEnabled($('filter-enabled').checked).catch(error => setNotice(error.message));
     $('sync-muted').onclick = () => XMuteTimeline.sync().catch(error => setNotice(error.message));
     $('reply-form').onsubmit = async event => {
@@ -130,6 +232,7 @@
     const $ = id => shadow.getElementById(id);
     const bag = state?.bag || [];
     const disabled = locked() || !state;
+    renderTransfer();
     const filter = XMuteTimeline.status();
     $('filter-enabled').checked = filter.enabled;
     $('filter-enabled').disabled = !state;

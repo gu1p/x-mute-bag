@@ -21,6 +21,31 @@ test('editing rejects duplicates, empty entries, and oversized phrases', () => {
   assert.throws(() => C.entry('a'.repeat(281)), /280/);
   assert.equal(C.edit(bag, bag[0].id, 'big cats')[0].text, 'big cats');
 });
+test('text import preserves expressions and handles BOM, line endings, whitespace and Unicode duplicates', () => {
+  const bag = C.add([], 'Café');
+  const result = C.importText(bag, '\uFEFF CAFE\u0301\r\n\r\n John\t Smith \n#Topic\r@someone\u2028中文\u2029john smith\ncomma, stays; here\n');
+  assert.deepEqual(result.bag.map(item => item.text), ['Café', 'John Smith', '#Topic', '@someone', '中文', 'comma, stays; here']);
+  assert.equal(result.added, 5);
+  assert.equal(result.duplicates, 2);
+  assert.equal(result.bag[0].id, bag[0].id);
+  assert.equal(bag.length, 1);
+});
+test('invalid imports report original line numbers without partially changing the bag', () => {
+  const bag = C.add([], 'existing');
+  assert.throws(() => C.importText(bag, 'valid\r\n\r\n' + '😀'.repeat(281)), /Line 3:.*280/);
+  assert.throws(() => C.importText(bag, 'valid\nwrong\0encoding'), /Line 2:.*UTF-8/);
+  assert.deepEqual(bag.map(item => item.text), ['existing']);
+  for (const text of ['', '\uFEFF \r\n\t', null, ['word']]) assert.throws(() => C.importText(bag, text));
+  assert.throws(() => C.importText(bag, 'é'.repeat(C.TEXT_LIMIT / 2 + 1)), /1 MB/);
+  assert.equal(C.importText([], '😀'.repeat(280)).added, 1);
+  assert.equal(C.importText(bag, 'EXISTING\nexisting').added, 0);
+});
+test('plain text exports round trip with stable ordering and no duplicate expressions', () => {
+  const exported = C.exportText([{text: 'Cafe\u0301'}, {text: 'John  Smith'}, {text: 'CAFÉ'}, {text: '#topic'}, {text: '@user'}]);
+  assert.deepEqual(exported, {count: 4, text: 'Café\nJohn Smith\n#topic\n@user\n'});
+  assert.deepEqual(C.exportText(C.importText([], exported.text).bag), exported);
+  assert.deepEqual(C.exportText([]), {count: 0, text: ''});
+});
 test('settings require a destination and valid X choices', () => {
   assert.throws(() => C.options({...C.DEFAULTS, home: false, notifications: false}), /Select/);
   assert.throws(() => C.options({...C.DEFAULTS, duration: '5d'}), /valid/);

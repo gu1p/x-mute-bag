@@ -221,11 +221,22 @@ async function handle(message, sender) {
     return job;
   }
   if (message.type === 'view') return view(state, account);
+  if (message.type === 'text:export') {
+    if (!['bag', 'all'].includes(message.scope)) throw new Error('Choose which words to export.');
+    const muted = message.scope === 'all' ? data.filter.terms.filter(term => term.expiresAt == null || term.expiresAt > Date.now()) : [];
+    return {account, ...C.exportText([...muted, ...data.bag])};
+  }
   const locked = state.job?.account === account && ['running', 'paused'].includes(state.job.status);
-  if (['add', 'pick', 'edit', 'remove', 'clear', 'options'].includes(message.type) && locked) {
+  if (['add', 'pick', 'edit', 'remove', 'clear', 'options', 'text:import'].includes(message.type) && locked) {
     throw new Error('Finish or end the current batch before editing your bag.');
   }
   switch (message.type) {
+    case 'text:import': {
+      const {bag, added, duplicates} = C.importText(data.bag, message.text);
+      data.bag = bag;
+      await persist(state);
+      return {...view(state, account), imported: {added, duplicates}};
+    }
     case 'pick': {
       const result = C.pick(data.bag, message.text, message.replace);
       data.bag = result.bag;

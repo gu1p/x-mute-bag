@@ -51,6 +51,50 @@ test('concurrent bag mutations serialize and do not lose entries', async () => {
   await h.message('add', {account: '__proto__', text: 'safe'});
   assert.equal(h.store().accounts.__proto__.bag[0].text, 'safe');
 });
+test('bulk imports merge atomically, serialize with other edits, persist and isolate accounts', async () => {
+  const h = harness();
+  const results = await Promise.all([
+    h.message('text:import', {text: 'Café\nJohn Smith\nCAFÉ'}),
+    h.message('text:import', {text: 'john smith\n#topic'}),
+    h.message('add', {text: 'last'}),
+  ]);
+  assert.deepEqual(results[0].imported, {added: 2, duplicates: 1});
+  assert.deepEqual(results[1].imported, {added: 1, duplicates: 1});
+  const before = h.store();
+  await assert.rejects(h.message('text:import', {text: 'valid\n' + 'x'.repeat(281)}), /Line 2/);
+  assert.deepEqual(h.store(), before);
+  await h.message('text:import', {account: 'other', text: 'other account'});
+  const restarted = harness(h.backing);
+  assert.deepEqual((await restarted.message('view')).bag.map(item => item.text), ['Café', 'John Smith', '#topic', 'last']);
+  assert.deepEqual((await restarted.message('view', {account: 'other'})).bag.map(item => item.text), ['other account']);
+  assert.equal(h.store().job, null);
+  assert.equal(h.tabs.size, 1, 'import does not open an X settings tab');
+  await h.message('apply');
+  await assert.rejects(h.message('text:import', {text: 'blocked'}), /current batch/);
+  await h.message('stop');
+  await assert.rejects(h.message('text:import', {text: 'still blocked'}), /current batch/);
+  await h.message('end');
+  await h.message('text:import', {text: 'allowed'});
+});
+test('text export includes cached mutes and pending words, supports bag only, and never mutates storage', async () => {
+  const h = harness();
+  await h.message('filters:import', {words: [{text: 'Café', forever: true}, {text: 'Saved phrase', forever: true}]}, 1, 'https://x.com/settings/muted_keywords');
+  await h.message('text:import', {text: 'CAFÉ\nPending phrase'});
+  await h.message('text:import', {account: 'other', text: 'private'});
+  const filter = h.backing.local.xMuteBag.accounts.tester.filter;
+  filter.terms[0].validUntil = 1; // Export the last known list even when automatic filtering is stale.
+  filter.terms.push({text: 'expired', key: 'expired', expiresAt: Date.now() - 1});
+  const before = h.store();
+  assert.deepEqual(await h.message('text:export', {scope: 'all'}), {account: 'tester', count: 3, text: 'Café\nSaved phrase\nPending phrase\n'});
+  assert.deepEqual(await h.message('text:export', {scope: 'bag'}), {account: 'tester', count: 2, text: 'CAFÉ\nPending phrase\n'});
+  assert.deepEqual(await h.message('text:export', {account: 'empty', scope: 'all'}), {account: 'empty', count: 0, text: ''});
+  await assert.rejects(h.message('text:export', {scope: 'invalid'}), /Choose/);
+  await assert.rejects(h.message('text:import', {text: 'bad'}, 1, 'https://example.com'), /Unsupported/);
+  await assert.rejects(h.message('text:export', {scope: 'all'}, 1, 'https://example.com'), /Unsupported/);
+  assert.deepEqual(h.store(), before);
+  await h.message('apply');
+  assert.equal((await h.message('text:export', {scope: 'bag'})).count, 2, 'export is available during a batch');
+});
 test('phrase replacement is atomic and paused jobs reject picker mutations', async () => {
   const h = harness();
   const first = await h.message('pick', {text: 'John'});

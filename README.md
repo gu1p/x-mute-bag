@@ -20,6 +20,9 @@ After updating these files, click **Reload** on the extension’s card and refre
 - Click the toolbar icon to start picking. Hover over a tweet word to preview it, then click to add it. Repeated words are collected once.
 - To pick a phrase or full name, click its first word and **Shift-click** its last word in the same post. Holding Shift previews the full range. This replaces the word just picked with one phrase; further Shift-clicks adjust that phrase. You can select forwards or backwards. Independently collected or manually edited entries stay in the bag.
 - Expand or collapse the bag at the top right. Edit entries, remove individual words, or type a complete phrase.
+- Open **Import / export words** to paste a list or choose **Load .txt file**. Use one word or complete expression per line, then click **Add lines to bag**. File loading lets you review the text first. Imports merge with your bag; they do not replace it or save to X until you click **Apply**.
+- Imports accept UTF-8 text up to 1 MB, including Windows and macOS line endings. Blank lines are ignored, surrounding/repeated whitespace is cleaned, and duplicates are skipped case-insensitively. Hashtags, usernames, punctuation, and spaces within an expression stay together. Each entry must be at most 280 characters; an invalid line is reported by number and nothing is imported until you fix it.
+- Use **Copy text** or **Download .txt** to export one entry per line. Choose **Bag only** for pending entries, or **Muted words + bag** for the last synced X muted words plus pending entries, with duplicates removed. Use **Sync muted words** first for an up-to-date backup; the export shows when the list was last synced and excludes known expired mutes. Text exports contain words only, not mute settings or account reply rules. Reimporting uses the bag’s current batch settings when you Apply.
 - Press **Escape** to stop picking. Closing the panel keeps the bag; clicking the toolbar icon reopens it.
 - The default is **forever**, in **Home timeline and notifications from anyone**. Expand the settings line to change these options for the entire batch.
 - Click **Apply**. A separate background tab saves entries one at a time, while your original feed stays in place.
@@ -66,7 +69,7 @@ Unit and worker tests can run without installing dependencies:
 node --test tests/core.test.cjs tests/background.test.cjs
 ```
 
-Browser tests load the real unpacked extension in a fresh Chromium profile and intercept all X requests with local fixtures. They never access a signed-in X account. To use an existing compatible Chromium executable, set `XMB_BROWSER`; set `XMB_HEADED=1` for a visible window.
+Browser tests load the real unpacked extension in a fresh Chromium profile and route X to a local HTTPS fixture server, including the first navigation of extension-created tabs. Other hostnames are blocked in that test browser. They never access a signed-in X account. OpenSSL must be available to generate a temporary test certificate; no certificate is installed in your system trust store. To use an existing compatible Chromium executable, set `XMB_BROWSER`; set `XMB_HEADED=1` for a visible window.
 
 For an environment where browser launch is restricted, `node tests/mcp-harness.cjs` builds `artifacts/mcp-harness.js`. Evaluate that script in a blank Chrome MCP test page, then call `XMBTest.replies()`, `XMBTest.filtering()`, `XMBTest.selection()`, `XMBTest.phrases()`, `XMBTest.apply()`, `XMBTest.failures()`, and `XMBTest.stopAndAccount()`. This harness runs the unchanged production scripts with simulated Chrome APIs and X responses; it does not replace testing extension installation.
 
@@ -76,11 +79,11 @@ Regenerate the included icons with `node scripts/icons.cjs`. Package only runtim
 
 ## Verification in this workspace
 
-- Unit and worker checks cover Unicode normalization, duplicates, phrase editing, queue checkpoints, origin/tab checks, concurrent requests, stopping, uncertain saves, and worker/browser restarts.
+- Unit and worker checks cover Unicode normalization, duplicates, phrase editing, text import validation and export round trips, queue checkpoints, origin/tab checks, concurrent requests, stopping, uncertain saves, and worker/browser restarts.
 - Chrome MCP fixture checks cover actual DOM ranges and highlights, Shift-click phrases and full names, reverse ranges, rapidly repeated clicks, dynamically loaded tweets, controlled inputs, sequential saves, options, partial failures, retries, closed tabs, and account changes.
 - Live X checks verified three clickable words and highlights, unchanged feed navigation, all English form controls, muted-list recognition, and a temporary draft value accepted by React. The draft was restored without clicking Save.
 - Live X Shift-click checks confirmed that a multiword range becomes one highlighted bag entry without navigating away or saving account settings.
 - Filtering checks cover native mute import, hiding the whole outer quoted post, Unicode/phrase boundaries, new and recycled feed cells, toggling, account isolation, persistence, native unmuting, and stale cache expiry.
 - Live X filtering checks confirmed that a match found only in quoted text hides the whole outer timeline cell, preserves X’s DOM and navigation, and is restored when the filter is switched off. These checks used a temporary local rule and did not change account settings.
 - Account rule checks cover store migration, duplicate handles, persistence, account isolation, connected parents, original posts, self-threads, quoted metadata, missing or conflicting parent context, recycled authors, new replies, direct conversations, pause/removal, and independence from word-cache expiry. A live X check hid a reply and its connected parent, left an unrelated reply visible, and restored both cells when the temporary rule was removed.
-- Launching a separate browser was blocked by the workspace environment. Chrome MCP also prohibits extension-management pages. The unpacked-extension Playwright suite remains available to run after local setup; installation and a real account save were not performed here.
+- The full unpacked-extension Chromium suite passes against local HTTPS fixtures. It covers paste and file imports, invalid encodings and oversized files, duplicate counts, clipboard and downloaded exports, export scopes, reimporting, persistence, and the existing picker, Apply, and filtering flows. These checks do not save to a real X account.

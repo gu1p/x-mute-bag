@@ -2,6 +2,7 @@ const {chromium} = require('playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const startFixtureServer = require('./fixture-server.cjs');
 const root = path.resolve(__dirname, '..');
 const fixture = fs.readFileSync(path.join(__dirname, 'fixture.html'), 'utf8');
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -15,31 +16,22 @@ async function until(probe, label, timeout = 15000) {
   throw new Error('Timed out: ' + label);
 }
 (async () => {
-  const context = await chromium.launchPersistentContext('', {
-    ...(process.env.XMB_BROWSER ? {executablePath: process.env.XMB_BROWSER} : {channel: 'chromium'}),
-    headless: process.env.XMB_HEADED !== '1',
-    args: ['--disable-extensions-except=' + root, '--load-extension=' + root, '--no-first-run'],
-    viewport: {width: 1280, height: 900},
-  });
   const model = {account: 'tester', words: [], saves: [], fail: null, uncertain: null, saveDelay: 0};
+  const server = await startFixtureServer(model, fixture);
+  let context;
   const errors = [];
-  context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
-  await context.route('https://x.com/**', async route => {
-    const url = new URL(route.request().url());
-    if (url.pathname === '/__fixture/state') return route.fulfill({json: {account: model.account, words: model.words}});
-    if (url.pathname === '/__fixture/save') {
-      const value = route.request().postDataJSON();
-      model.saves.push(value);
-      if (model.saveDelay) await delay(model.saveDelay);
-      if (model.fail === value.text) return route.fulfill({json: {error: 'Try again later: fixture failure'}});
-      if (model.words.some(word => word.text.toLowerCase() === value.text.toLowerCase())) return route.fulfill({json: {error: 'This word is already muted'}});
-      model.words.push(value);
-      if (model.uncertain === value.text) return route.fulfill({json: {error: 'Try again: saved but response lost'}});
-      return route.fulfill({json: {ok: true}});
-    }
-    return route.fulfill({contentType: 'text/html', body: fixture});
-  });
   try {
+    context = await chromium.launchPersistentContext('', {
+      ...(process.env.XMB_BROWSER ? {executablePath: process.env.XMB_BROWSER} : {channel: 'chromium'}),
+      headless: process.env.XMB_HEADED !== '1',
+      // DNS routing also covers the first navigation of chrome.tabs.create(),
+      // before Playwright can attach to the new tab. No X traffic leaves this machine.
+      args: ['--disable-extensions-except=' + root, '--load-extension=' + root, '--no-first-run',
+        '--no-proxy-server', '--ignore-certificate-errors',
+        '--host-resolver-rules=MAP x.com 127.0.0.1:' + server.port + ', MAP * ~NOTFOUND'],
+      viewport: {width: 1280, height: 900},
+    });
+    context.on('page', page => page.on('pageerror', error => errors.push(error.message)));
     const worker = context.serviceWorkers()[0] || await context.waitForEvent('serviceworker', {timeout: 10000});
     const page = await context.newPage();
     await page.goto('https://x.com/home');
@@ -47,7 +39,10 @@ async function until(probe, label, timeout = 15000) {
     const store = () => worker.evaluate(async () => (await chrome.storage.local.get('xMuteBag')).xMuteBag);
     const tabId = await worker.evaluate(async () => (await chrome.tabs.query({url: 'https://x.com/home'}))[0].id);
     // Exercise the same callback Chrome invokes for an actual toolbar click.
-    const toggle = () => worker.evaluate(id => activateTab({id, url: 'https://x.com/home'}), tabId);
+    const toggle = async () => {
+      await worker.evaluate(id => activateTab({id, url: 'https://x.com/home'}), tabId);
+      await page.locator('#x-mute-bag').waitFor({state: 'visible'});
+    };
     await toggle();
     const panel = page.locator('#x-mute-bag');
     await panel.getByRole('button', {name: /Picking words/}).waitFor();
@@ -123,15 +118,15 @@ async function until(probe, label, timeout = 15000) {
       const bag = (await store()).accounts.tester.bag;
       return bag.length === 1 && bag[0].text === 'John Paul Smith';
     }, 'Shift-click full name');
-    assert.equal(await page.evaluate(() => [...CSS.highlights.get('xmb-picked')].some(r => r.toString().replace(/\s+/g, ' ').trim() === 'John Paul Smith')), true);
+    await until(async () => page.evaluate(() => [...(CSS.highlights.get('xmb-picked') || [])].some(r => r.toString().replace(/\s+/g, ' ').trim() === 'John Paul Smith')), 'phrase highlight');
     assert.equal(page.url(), 'https://x.com/home');
     await pick('Junior', 0, true);
-    await until(async () => (await store()).accounts.tester.bag[0].text === 'John Paul Smith Junior', 'extend phrase');
+    await until(async () => (await store()).accounts.tester.bag[0]?.text === 'John Paul Smith Junior', 'extend phrase');
     await panel.getByRole('button', {name: 'Clear bag'}).click();
     await pick('Smith'); await pick('John', 0, true);
-    await until(async () => (await store()).accounts.tester.bag[0].text === 'John Paul Smith', 'backwards phrase');
+    await until(async () => (await store()).accounts.tester.bag[0]?.text === 'John Paul Smith', 'backwards phrase');
     await panel.getByRole('button', {name: 'Apply 1 muted word', exact: true}).click();
-    await until(async () => (await store()).job.status === 'complete', 'save picked phrase', 30000);
+    await until(async () => (await store()).job?.status === 'complete', 'save picked phrase', 30000);
     assert.equal(model.saves.length, 1);
     assert.equal(model.saves[0].text, 'John Paul Smith');
     model.saves = [];
@@ -154,7 +149,7 @@ async function until(probe, label, timeout = 15000) {
     for (const save of model.saves) assert.deepEqual({home: save.home, notifications: save.notifications, audience: save.audience, duration: save.duration}, {home: false, notifications: true, audience: 1, duration: 2});
     assert.equal(page.url(), 'https://x.com/home');
     assert.equal(await page.evaluate(() => scrollY), beforeScroll);
-    assert.equal(await worker.evaluate(id => chrome.tabs.get(id).then(() => true, () => false), completed.job.tabId), false);
+    await until(async () => worker.evaluate(id => chrome.tabs.get(id).then(() => false, () => true), completed.job.tabId), 'owned tab closed');
     console.log('PASS: sequential Apply, duplicate skip, settings, confirmed results, owned-tab closure and original scroll');
 
     model.fail = 'fail word';
@@ -248,7 +243,7 @@ async function until(probe, label, timeout = 15000) {
       cell('account-self', 'Alice', '<div dir="ltr">Replying to <span>@Alice</span></div><div data-testid="tweetText">My thread continues</div>');
     });
     await addReplyPosts();
-    await panel.getByRole('textbox', {name: 'Hide replies from account', exact: true}).fill('@Alice');
+    await panel.getByLabel('Hide replies from account', {exact: true}).fill('@Alice');
     await panel.locator('#reply-add').click();
     await until(async () => !await page.locator('#account-reply').isVisible(), 'account reply hidden');
     assert.equal(await page.locator('#account-original').isVisible(), true);
@@ -264,9 +259,86 @@ async function until(probe, label, timeout = 15000) {
     await panel.getByRole('button', {name: 'Remove reply rule for @alice', exact: true}).click();
     await until(async () => await page.locator('#account-reply').isVisible(), 'removed account rule');
     console.log('PASS: local account reply rules, originals, self-threads, pause, reload and removal');
+    await panel.getByRole('button', {name: 'Clear bag', exact: true}).click();
+    await add('Café');
+    await panel.locator('#transfer summary').click();
+    const importText = panel.getByRole('textbox', {name: 'Words to import', exact: true});
+    const importButton = panel.getByRole('button', {name: 'Add lines to bag', exact: true});
+    const transferStatus = panel.locator('#transfer-status');
+    const savesBeforeImport = model.saves.length;
+    await importText.fill('CAFE\u0301\n\nJohn  Smith\r\n#topic\njohn smith');
+    await importButton.click();
+    await until(async () => (await transferStatus.textContent()).includes('2 added to bag · 2 duplicates skipped'), 'paste import counts');
+    assert.deepEqual((await store()).accounts.tester.bag.map(item => item.text), ['Café', 'John Smith', '#topic']);
+    assert.equal(await importText.inputValue(), '');
+    assert.equal(await importButton.isDisabled(), true);
+    const invalid = 'valid first line\n\n' + 'x'.repeat(281);
+    await importText.fill(invalid);
+    await importButton.click();
+    await until(async () => (await transferStatus.textContent()).includes('Line 3:'), 'invalid line number');
+    assert.equal(await importText.inputValue(), invalid, 'keep invalid text available for correction');
+    assert.equal((await store()).accounts.tester.bag.length, 3, 'invalid import is atomic');
+    const file = {name: 'words.txt', mimeType: 'text/plain', buffer: Buffer.from('\uFEFFCafé\r\n中文\r\n@someone\r\n#topic\r\n')};
+    // Exercise the visible file-picker button, then the real File API in the content script.
+    const chooser = page.waitForEvent('filechooser');
+    await panel.getByRole('button', {name: 'Load .txt file', exact: true}).click();
+    await (await chooser).setFiles(file);
+    await until(async () => (await transferStatus.textContent()).includes('words.txt loaded'), 'file preview');
+    assert.equal((await store()).accounts.tester.bag.length, 3, 'loading a file only previews it');
+    assert.ok((await importText.inputValue()).includes('中文'));
+    await importButton.click();
+    await until(async () => (await transferStatus.textContent()).includes('2 added to bag · 2 duplicates skipped'), 'file import counts');
+    await panel.locator('#import-file').setInputFiles(file);
+    await until(async () => (await transferStatus.textContent()).includes('words.txt loaded'), 'same file can be selected again');
+    await importButton.click();
+    await until(async () => (await transferStatus.textContent()).includes('0 added to bag · 4 duplicates skipped'), 'repeat import is idempotent');
+    await panel.locator('#import-file').setInputFiles({name: 'invalid.txt', mimeType: 'text/plain', buffer: Buffer.from([0xff, 0xfe, 0x61, 0x00])});
+    await until(async () => (await transferStatus.textContent()).includes('Choose a UTF-8 text file'), 'invalid file encoding');
+    await panel.locator('#import-file').setInputFiles({name: 'large.txt', mimeType: 'text/plain', buffer: Buffer.alloc(1024 * 1024 + 1, 'a')});
+    await until(async () => (await transferStatus.textContent()).includes('1 MB'), 'oversized file rejected');
+    await panel.getByLabel('Export source', {exact: true}).selectOption('bag');
+    const downloading = page.waitForEvent('download');
+    await panel.getByRole('button', {name: 'Download .txt', exact: true}).click();
+    const download = await downloading;
+    assert.equal(download.suggestedFilename(), 'x-mute-bag-tester-bag.txt');
+    const exported = fs.readFileSync(await download.path(), 'utf8');
+    assert.equal(exported, 'Café\nJohn Smith\n#topic\n中文\n@someone\n');
+    await context.grantPermissions(['clipboard-read', 'clipboard-write'], {origin: 'https://x.com'});
+    await page.bringToFront();
+    await panel.getByRole('button', {name: 'Copy text', exact: true}).click();
+    await until(async () => (await transferStatus.textContent()) === '5 entries copied.', 'clipboard export');
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), exported);
+    await panel.getByLabel('Export source', {exact: true}).selectOption('all');
+    await panel.getByRole('button', {name: 'Copy text', exact: true}).click();
+    await until(async () => (await transferStatus.textContent()) === '6 entries copied.', 'muted words and bag export');
+    assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'spoiler\n' + exported);
+    await panel.getByRole('button', {name: 'Clear bag', exact: true}).click();
+    await panel.locator('#import-file').setInputFiles({name: download.suggestedFilename(), mimeType: 'text/plain', buffer: Buffer.from(exported)});
+    await until(async () => (await transferStatus.textContent()).includes('loaded.'), 'load exported text');
+    await importButton.click();
+    await until(async () => (await transferStatus.textContent()).includes('5 added to bag · 0 duplicates skipped'), 'download reimport');
+    assert.equal(model.saves.length, savesBeforeImport, 'import does not submit to X');
+    await page.reload();
+    await page.locator('[data-testid=tweetText]').first().waitFor();
+    await toggle();
+    await panel.getByRole('textbox', {name: 'Edit John Smith', exact: true}).waitFor();
+    assert.deepEqual((await store()).accounts.tester.bag.map(item => item.text), exported.trim().split('\n'));
+    console.log('PASS: paste and file imports, validation, duplicates, clipboard, downloads, export scopes, round trip and persistence');
+    await panel.locator('#transfer summary').click();
+    await panel.locator('#transfer').evaluate(element => element.scrollIntoView({block: 'start'}));
     fs.mkdirSync(path.join(root, 'artifacts'), {recursive: true});
     await page.screenshot({path: path.join(root, 'artifacts', 'browser-fixture.png')});
     assert.deepEqual(errors, []);
     console.log('All browser checks passed with the actual unpacked extension.');
-  } finally { await context.close(); }
+  } catch (error) {
+    const worker = context?.serviceWorkers()[0];
+    console.error('Browser failure state:', JSON.stringify({
+      state: worker && await worker.evaluate(async () => (await chrome.storage.local.get('xMuteBag')).xMuteBag).catch(() => null),
+      tabs: worker && await worker.evaluate(() => chrome.tabs.query({})).catch(() => []),
+      pages: await Promise.all((context?.pages() || []).map(async page => ({url: page.url(), text: await page.locator('body').innerText().catch(() => ''),
+        panel: await page.evaluate(() => { const host = document.querySelector('#x-mute-bag'); return host ? {hidden: host.hidden, text: host.shadowRoot?.querySelector('.panel')?.textContent} : null; }).catch(() => null)}))),
+      errors,
+    }));
+    throw error;
+  } finally { await context?.close(); await server.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });
