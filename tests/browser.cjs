@@ -37,6 +37,14 @@ async function until(probe, label, timeout = 15000) {
     await page.goto('https://x.com/home');
     await page.locator('[data-testid=tweetText]').first().waitFor();
     const store = () => worker.evaluate(async () => (await chrome.storage.local.get('xMuteBag')).xMuteBag);
+    // Keep one real 30-second retry below; fast-forward later cooldowns while exercising Chrome's alarm event.
+    const advanceRetry = () => worker.evaluate(() => exclusively(async () => {
+      const state = await readStore();
+      if (state.job?.status !== 'retrying') throw new Error('Expected an automatic retry');
+      state.job.retryAt = Date.now();
+      await persist(state);
+      await chrome.alarms.create('xmb-batch', {when: Date.now() + 50});
+    }));
     const tabId = await worker.evaluate(async () => (await chrome.tabs.query({url: 'https://x.com/home'}))[0].id);
     // Exercise the same callback Chrome invokes for an actual toolbar click.
     const toggle = async () => {
@@ -46,6 +54,18 @@ async function until(probe, label, timeout = 15000) {
     await toggle();
     const panel = page.locator('#x-mute-bag');
     await panel.getByRole('button', {name: /Picking words/}).waitFor();
+    async function reveal(id) {
+      if (!['more-options', 'batch-details'].includes(id)) await reveal('more-options');
+      if (id === 'account-settings') await reveal('filter-settings');
+      const details = panel.locator('#' + id);
+      if (!await details.evaluate(element => element.open)) await details.locator(':scope > summary').click();
+    }
+    assert.equal(await panel.locator('#more-options').evaluate(element => element.open), false);
+    assert.equal(await panel.locator('#import-text').isVisible(), false);
+    assert.equal(await panel.locator('#filter-enabled').isVisible(), false);
+    assert.equal(await panel.locator('#reply-handle').isVisible(), false);
+    fs.mkdirSync(path.join(root, 'artifacts'), {recursive: true});
+    await page.screenshot({path: path.join(root, 'artifacts', 'browser-empty.png')});
     async function pick(word, occurrence = 0, shift = false) {
       const point = await page.evaluate(({word, occurrence}) => {
         const walker = document.createTreeWalker(document.querySelector('main'), NodeFilter.SHOW_TEXT);
@@ -70,6 +90,14 @@ async function until(probe, label, timeout = 15000) {
       await panel.getByRole('textbox', {name: 'Add a word or phrase', exact: true}).fill(text);
       await panel.getByRole('button', {name: 'Add entry', exact: true}).click();
       await until(async () => (await store()).accounts.tester.bag.some(i => i.text === text), 'bag add ' + text);
+    }
+    async function apply(count) {
+      const previous = (await store()).job?.id;
+      await panel.getByRole('button', {name: 'Apply ' + count + ' muted ' + (count === 1 ? 'word' : 'words'), exact: true}).click();
+      await until(async () => {
+        const job = (await store()).job;
+        return job && job.id !== previous;
+      }, 'new batch started');
     }
     await pick('Café');
     await until(async () => (await store()).accounts.tester.bag.length === 1, 'word picked');
@@ -125,7 +153,7 @@ async function until(probe, label, timeout = 15000) {
     await panel.getByRole('button', {name: 'Clear bag'}).click();
     await pick('Smith'); await pick('John', 0, true);
     await until(async () => (await store()).accounts.tester.bag[0]?.text === 'John Paul Smith', 'backwards phrase');
-    await panel.getByRole('button', {name: 'Apply 1 muted word', exact: true}).click();
+    await apply(1);
     await until(async () => (await store()).job?.status === 'complete', 'save picked phrase', 30000);
     assert.equal(model.saves.length, 1);
     assert.equal(model.saves[0].text, 'John Paul Smith');
@@ -134,13 +162,13 @@ async function until(probe, label, timeout = 15000) {
 
     model.words = [{text: 'existing'}];
     for (const word of ['existing', 'new one', 'new two']) await add(word);
-    await panel.locator('#summary').click();
+    await reveal('mute-options');
     await panel.getByLabel('Home timeline', {exact: true}).uncheck();
     await panel.getByLabel('Notification audience', {exact: true}).selectOption('unfollowed');
     await panel.getByLabel('Mute duration', {exact: true}).selectOption('7d');
     await page.evaluate(() => scrollTo(0, 100));
     const beforeScroll = await page.evaluate(() => scrollY);
-    await panel.getByRole('button', {name: 'Apply 3 muted words', exact: true}).click();
+    await apply(3);
     await until(async () => (await store()).job?.status === 'complete', 'three-entry batch', 30000);
     const completed = await store();
     assert.deepEqual(completed.job.items.map(i => i.status), ['skipped', 'added', 'added']);
@@ -151,31 +179,54 @@ async function until(probe, label, timeout = 15000) {
     assert.equal(await page.evaluate(() => scrollY), beforeScroll);
     await until(async () => worker.evaluate(id => chrome.tabs.get(id).then(() => false, () => true), completed.job.tabId), 'owned tab closed');
     console.log('PASS: sequential Apply, duplicate skip, settings, confirmed results, owned-tab closure and original scroll');
+    await panel.locator('#more-options > summary').click();
 
     model.fail = 'fail word';
     await add('first success'); await add('fail word'); await add('last pending');
-    await panel.getByRole('button', {name: 'Apply 3 muted words', exact: true}).click();
-    await until(async () => (await store()).job?.status === 'paused', 'partial failure', 30000);
+    await apply(3);
+    await until(async () => (await store()).job?.status === 'retrying', 'partial failure schedules a retry', 30000);
     assert.deepEqual((await store()).accounts.tester.bag.map(i => i.text), ['fail word', 'last pending']);
+    await until(async () => (await panel.locator('#status-text').textContent()).includes('Retrying automatically'), 'automatic retry status');
+    assert.equal(await panel.locator('#status-error').isVisible(), false, 'error detail stays collapsed');
+    assert.equal(await panel.getByRole('button', {name: 'Apply 2 muted words', exact: true}).isDisabled(), true);
+    assert.equal(await worker.evaluate(async () => !!await chrome.alarms.get('xmb-batch')), true);
+    await panel.getByRole('button', {name: 'Close bag', exact: true}).click();
     model.fail = null;
-    await panel.getByRole('button', {name: 'Resume / retry', exact: true}).click();
-    await until(async () => (await store()).job.status === 'complete', 'retry remaining words', 30000);
+    await until(async () => (await store()).job.status === 'complete', 'automatically retry remaining words with the panel closed', 65000);
+    await toggle();
     assert.equal(model.saves.filter(s => s.text === 'first success').length, 1);
-    console.log('PASS: partial failure retains pending words and retry does not repeat confirmed saves');
+    assert.equal(model.saves.filter(s => s.text === 'fail word').length, 2);
+    console.log('PASS: automatic alarm retry with the panel closed, pending entries retained, and confirmed saves never repeated');
 
     model.uncertain = 'uncertain';
     await add('uncertain');
-    await panel.getByRole('button', {name: 'Apply 1 muted word', exact: true}).click();
-    await until(async () => (await store()).job.status === 'paused', 'uncertain save', 30000);
-    await panel.getByRole('button', {name: 'Resume / retry', exact: true}).click();
+    await apply(1);
+    await until(async () => (await store()).job.status === 'retrying', 'uncertain save schedules a retry', 30000);
+    await advanceRetry();
     await until(async () => (await store()).job.status === 'complete', 'uncertain save recovery', 30000);
     assert.equal(model.saves.filter(s => s.text === 'uncertain').length, 1);
     model.uncertain = null;
     console.log('PASS: uncertain save is reconciled from the list without resubmission');
 
+    model.fail = 'stop retry';
+    await add('stop retry');
+    await apply(1);
+    await until(async () => (await store()).job.status === 'retrying', 'retry cooldown before Stop', 30000);
+    await panel.getByRole('button', {name: 'Stop', exact: true}).click();
+    await until(async () => (await store()).job.status === 'paused', 'Stop cancels retry');
+    assert.equal(await worker.evaluate(async () => await chrome.alarms.get('xmb-batch')), undefined);
+    model.fail = null;
+    await worker.evaluate(() => chrome.alarms.create('xmb-batch', {when: Date.now() + 50}));
+    await until(async () => !await worker.evaluate(() => chrome.alarms.get('xmb-batch')), 'late alarm ignored after Stop');
+    assert.equal((await store()).job.status, 'paused');
+    assert.equal(model.saves.filter(s => s.text === 'stop retry').length, 1);
+    await panel.getByRole('button', {name: 'Resume / retry', exact: true}).click();
+    await until(async () => (await store()).job.status === 'complete', 'explicit resume after Stop', 30000);
+    console.log('PASS: Stop cancels scheduled retries; late alarms cannot restart a stopped batch');
+
     model.saveDelay = 1200;
     await add('stop first'); await add('stop second');
-    await panel.getByRole('button', {name: 'Apply 2 muted words', exact: true}).click();
+    await apply(2);
     await until(() => model.saves.some(s => s.text === 'stop first'), 'in-flight save');
     await panel.getByRole('button', {name: 'Stop', exact: true}).click();
     await delay(1600);
@@ -192,13 +243,19 @@ async function until(probe, label, timeout = 15000) {
     // Mutating only the fixture’s account identity must never submit for another account.
     model.account = 'different';
     await add('account guard');
-    await panel.getByRole('button', {name: 'Apply 1 muted word', exact: true}).click();
-    await until(async () => (await store()).job.status === 'paused', 'account mismatch', 30000);
+    await apply(1);
+    await until(async () => (await store()).job.status === 'retrying', 'account mismatch waits without saving', 30000);
+    assert.equal(model.saves.some(s => s.text === 'account guard'), false);
+    await advanceRetry();
+    await until(async () => (await store()).job.status === 'retrying' && (await store()).job.retryCount === 2, 'wrong account remains blocked on retry', 30000);
     assert.equal(model.saves.some(s => s.text === 'account guard'), false);
     model.account = 'tester';
-    await panel.getByRole('button', {name: 'End batch', exact: true}).click();
-    console.log('PASS: account mismatch pauses before saving');
+    await advanceRetry();
+    await until(async () => (await store()).job.status === 'complete', 'automatic recovery after switching back to the correct account', 30000);
+    assert.equal(model.saves.filter(s => s.text === 'account guard').length, 1);
+    console.log('PASS: retries never save for the wrong account and continue automatically after switching back');
     model.words = [{text: 'Silenced Person'}, {text: 'spoiler'}];
+    await reveal('filter-settings');
     await panel.getByRole('button', {name: 'Sync muted words', exact: true}).click();
     await until(async () => (await store()).accounts.tester.filter.terms.some(i => i.text === 'Silenced Person'), 'native mute import');
     await page.evaluate(() => {
@@ -232,6 +289,7 @@ async function until(probe, label, timeout = 15000) {
     await until(async () => await page.locator('#persist-filter-test').getAttribute('data-xmb-filtered') === 'true', 'filter active without opening panel');
     console.log('PASS: native mute import, whole quoted-post hiding, boundaries, pause, recycled cells, unmute and persistence');
     await toggle();
+    await reveal('account-settings');
     const addReplyPosts = () => page.evaluate(() => {
       const cell = (id, author, content) => {
         const element = document.createElement('div'); element.dataset.testid = 'cellInnerDiv'; element.id = id;
@@ -256,12 +314,13 @@ async function until(probe, label, timeout = 15000) {
     await addReplyPosts();
     await until(async () => !await page.locator('#account-reply').isVisible(), 'account rule persists without panel');
     await toggle();
+    await reveal('account-settings');
     await panel.getByRole('button', {name: 'Remove reply rule for @alice', exact: true}).click();
     await until(async () => await page.locator('#account-reply').isVisible(), 'removed account rule');
     console.log('PASS: local account reply rules, originals, self-threads, pause, reload and removal');
-    await panel.getByRole('button', {name: 'Clear bag', exact: true}).click();
+    if ((await store()).accounts.tester.bag.length) await panel.getByRole('button', {name: 'Clear bag', exact: true}).click();
     await add('Café');
-    await panel.locator('#transfer summary').click();
+    await reveal('import-tools');
     const importText = panel.getByRole('textbox', {name: 'Words to import', exact: true});
     const importButton = panel.getByRole('button', {name: 'Add lines to bag', exact: true});
     const transferStatus = panel.locator('#transfer-status');
@@ -296,6 +355,8 @@ async function until(probe, label, timeout = 15000) {
     await until(async () => (await transferStatus.textContent()).includes('Choose a UTF-8 text file'), 'invalid file encoding');
     await panel.locator('#import-file').setInputFiles({name: 'large.txt', mimeType: 'text/plain', buffer: Buffer.alloc(1024 * 1024 + 1, 'a')});
     await until(async () => (await transferStatus.textContent()).includes('1 MB'), 'oversized file rejected');
+    await reveal('export-tools');
+    const exportStatus = panel.locator('#export-status');
     await panel.getByLabel('Export source', {exact: true}).selectOption('bag');
     const downloading = page.waitForEvent('download');
     await panel.getByRole('button', {name: 'Download .txt', exact: true}).click();
@@ -306,11 +367,11 @@ async function until(probe, label, timeout = 15000) {
     await context.grantPermissions(['clipboard-read', 'clipboard-write'], {origin: 'https://x.com'});
     await page.bringToFront();
     await panel.getByRole('button', {name: 'Copy text', exact: true}).click();
-    await until(async () => (await transferStatus.textContent()) === '5 entries copied.', 'clipboard export');
+    await until(async () => (await exportStatus.textContent()) === '5 entries copied.', 'clipboard export');
     assert.equal(await page.evaluate(() => navigator.clipboard.readText()), exported);
     await panel.getByLabel('Export source', {exact: true}).selectOption('all');
     await panel.getByRole('button', {name: 'Copy text', exact: true}).click();
-    await until(async () => (await transferStatus.textContent()) === '6 entries copied.', 'muted words and bag export');
+    await until(async () => (await exportStatus.textContent()) === '6 entries copied.', 'muted words and bag export');
     assert.equal(await page.evaluate(() => navigator.clipboard.readText()), 'spoiler\n' + exported);
     await panel.getByRole('button', {name: 'Clear bag', exact: true}).click();
     await panel.locator('#import-file').setInputFiles({name: download.suggestedFilename(), mimeType: 'text/plain', buffer: Buffer.from(exported)});
@@ -324,10 +385,13 @@ async function until(probe, label, timeout = 15000) {
     await panel.getByRole('textbox', {name: 'Edit John Smith', exact: true}).waitFor();
     assert.deepEqual((await store()).accounts.tester.bag.map(item => item.text), exported.trim().split('\n'));
     console.log('PASS: paste and file imports, validation, duplicates, clipboard, downloads, export scopes, round trip and persistence');
-    await panel.locator('#transfer summary').click();
-    await panel.locator('#transfer').evaluate(element => element.scrollIntoView({block: 'start'}));
+    assert.equal(await panel.locator('#more-options').evaluate(element => element.open), false);
     fs.mkdirSync(path.join(root, 'artifacts'), {recursive: true});
     await page.screenshot({path: path.join(root, 'artifacts', 'browser-fixture.png')});
+    await reveal('more-options');
+    assert.equal(await panel.locator('#import-text').isVisible(), false, 'opening More options only reveals section headings');
+    await page.screenshot({path: path.join(root, 'artifacts', 'browser-options.png')});
+    console.log('PASS: compact default panel and progressive disclosure of imports, exports, settings and filters');
     assert.deepEqual(errors, []);
     console.log('All browser checks passed with the actual unpacked extension.');
   } catch (error) {

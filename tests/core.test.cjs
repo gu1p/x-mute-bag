@@ -1,6 +1,11 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const C = require('../core.js');
+test('retry delays back off to five minutes without a finite retry limit', () => {
+  assert.deepEqual([1, 2, 3, 4, 5, 20, 1000].map(C.retryDelay), [30000, 60000, 120000, 240000, 300000, 300000, 300000]);
+  assert.equal(C.activeJob({status: 'retrying'}), true);
+  assert.equal(C.activeJob({status: 'complete'}), false);
+});
 test('Unicode normalization and case-insensitive deduplication preserve accents', () => {
   const bag = C.add([], '  ELEIÇÃO  ');
   assert.equal(C.add(bag, 'eleição').length, 1);

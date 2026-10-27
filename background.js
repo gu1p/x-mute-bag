@@ -2,6 +2,7 @@
 importScripts('core.js');
 const C = XMuteCore;
 const STORE = 'xMuteBag';
+const BATCH_ALARM = 'xmb-batch';
 let serial = Promise.resolve();
 function exclusively(task) {
   const next = serial.then(task);
@@ -13,22 +14,37 @@ async function readStore() {
 }
 async function persist(state) {
   await chrome.storage.local.set({[STORE]: state});
+  await scheduleBatch(state.job);
+}
+async function scheduleBatch(job) {
+  const when = job?.status === 'retrying' ? job.retryAt : job?.status === 'running' ? job.updatedAt + C.BATCH_STALE_MS : null;
+  if (!when) { await chrome.alarms.clear(BATCH_ALARM); return; }
+  const alarm = await chrome.alarms.get(BATCH_ALARM);
+  // An earlier alarm can recheck progress; unrelated storage writes must not defer it.
+  if (!alarm || alarm.scheduledTime > Math.max(when, Date.now() + 30000) + 1000) {
+    await chrome.alarms.create(BATCH_ALARM, {when});
+  }
 }
 const boot = (async () => {
   const session = await chrome.storage.session.get('awake');
+  const state = await readStore();
+  const job = state.job;
   if (!session.awake) {
-    const state = await readStore();
-    if (state.job?.status === 'running') {
-      state.job.status = 'paused';
-      state.job.error = 'Browser session interrupted. Resume to check saved words and continue.';
-      await persist(state);
+    if (job?.status === 'running') {
+      retry(job, 'Browser session interrupted. Saved words will be checked automatically.');
     }
+    if (job && ['running', 'retrying'].includes(job.status)) job.tabId = null;
     if (state.filterSync?.status === 'running') {
       state.filterSync.status = 'interrupted';
-      await persist(state);
     }
     await chrome.storage.session.set({awake: true});
   }
+  // Upgrade interrupted/error-paused batches, but preserve an intentional Stop.
+  if (job?.status === 'paused' && !job.pauseReason && !/^Stopped\./i.test(job.error || '')) {
+    retry(job, job.error || 'Retrying the interrupted batch.');
+  }
+  if (job?.status === 'running' && !job.runId) retry(job, 'Extension updated. Rechecking saved words automatically.');
+  await persist(state);
 })();
 function validSender(sender) {
   return sender.id === chrome.runtime.id && sender.tab?.id != null &&
@@ -99,7 +115,7 @@ async function filters(message, sender, state, account) {
     return filterView(state, account);
   }
   if (message.type !== 'filters:sync') throw new Error('Unsupported filter request.');
-  if (!data.filter.enabled || state.job?.status === 'running') return filterView(state, account);
+  if (!data.filter.enabled || ['running', 'retrying'].includes(state.job?.status)) return filterView(state, account);
   if (sync?.status === 'running') {
     if (now - sync.startedAt < 45000) return filterView(state, account);
     await closeSync(state, 'Muted-word sync timed out. Try Sync muted words again.');
@@ -126,13 +142,24 @@ function view(state, account) {
 }
 function currentJob(state, account) {
   const job = state.job;
-  if (!job || job.account !== account || !['running', 'paused'].includes(job.status)) throw new Error('There is no active batch for this account.');
+  if (!job || job.account !== account || !C.activeJob(job)) throw new Error('There is no active batch for this account.');
   return job;
 }
 function pause(job, error) {
   job.status = 'paused';
+  job.pauseReason = 'user';
+  job.retryAt = null;
   job.error = String(error || 'The batch was paused.').slice(0, 500);
   job.updatedAt = Date.now();
+  if (job.items[job.index]) job.items[job.index].status = 'failed';
+}
+function retry(job, error) {
+  job.status = 'retrying';
+  job.pauseReason = null;
+  job.retryCount = (job.retryCount || 0) + 1;
+  job.updatedAt = Date.now();
+  job.retryAt = job.updatedAt + C.retryDelay(job.retryCount);
+  job.error = String(error || 'The save could not be confirmed.').slice(0, 500);
   if (job.items[job.index]) job.items[job.index].status = 'failed';
 }
 async function kick(tabId) {
@@ -142,7 +169,7 @@ async function runnerTab(job) {
   if (job.tabId != null) {
     try {
       const tab = await chrome.tabs.get(job.tabId);
-      if (new URL(tab.url || tab.pendingUrl).origin === 'https://x.com') {
+      if (new URL(tab.url || tab.pendingUrl).origin === 'https://x.com' || tab.url?.startsWith('chrome-error://')) {
         await chrome.tabs.update(tab.id, {url: 'https://x.com/settings/muted_keywords'});
         return tab.id;
       }
@@ -150,6 +177,40 @@ async function runnerTab(job) {
   }
   return (await chrome.tabs.create({url: 'https://x.com/settings/muted_keywords', active: false})).id;
 }
+async function resumeBatch(state) {
+  const job = state.job;
+  await closeSync(state);
+  const previousTabId = job.tabId;
+  job.tabId = null;
+  job.status = 'running';
+  job.phase = 'check';
+  job.runId = crypto.randomUUID();
+  job.error = '';
+  job.pauseReason = null;
+  job.retryAt = null;
+  job.updatedAt = Date.now();
+  job.items[job.index].status = 'pending';
+  // Save the new run identity before reloading the runner; old callbacks cannot affect it.
+  await persist(state);
+  try { job.tabId = await runnerTab({...job, tabId: previousTabId}); }
+  catch (error) { retry(job, error.message); }
+  await persist(state);
+  if (job.status === 'running') await kick(job.tabId);
+}
+async function wakeBatch() {
+  await boot;
+  const state = await readStore(), job = state.job;
+  if (job?.status === 'retrying' && job.retryAt <= Date.now()) {
+    await resumeBatch(state);
+  } else if (job?.status === 'running' && Date.now() - job.updatedAt >= C.BATCH_STALE_MS) {
+    retry(job, 'The settings tab stopped responding. Rechecking saved words automatically.');
+    await persist(state);
+  } else await scheduleBatch(job);
+}
+const wake = () => exclusively(wakeBatch).catch(console.error);
+chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === BATCH_ALARM) wake(); });
+chrome.runtime.onStartup.addListener(wake);
+chrome.runtime.onInstalled.addListener(wake);
 async function handle(message, sender) {
   await boot;
   if (!validSender(sender) || !message || typeof message.type !== 'string') throw new Error('Unsupported request.');
@@ -182,7 +243,7 @@ async function handle(message, sender) {
   const isRunner = message.type.startsWith('runner:');
   if (isRunner) {
     const job = currentJob(state, account);
-    if (job.tabId !== sender.tab.id || job.id !== message.jobId || job.status !== 'running') throw new Error('This batch is no longer running.');
+    if (job.tabId !== sender.tab.id || job.id !== message.jobId || job.status !== 'running' || job.runId !== message.runId) throw new Error('This batch is no longer running.');
     const item = job.items[job.index];
     if (message.itemId !== item.id) throw new Error('This entry has already advanced.');
     switch (message.type) {
@@ -207,8 +268,8 @@ async function handle(message, sender) {
         data.bag = data.bag.filter(word => word.id !== item.id);
         break;
       }
-      case 'runner:pause':
-        pause(job, message.error);
+      case 'runner:failed':
+        retry(job, message.error);
         break;
       default: throw new Error('Unsupported runner request.');
     }
@@ -226,7 +287,7 @@ async function handle(message, sender) {
     const muted = message.scope === 'all' ? data.filter.terms.filter(term => term.expiresAt == null || term.expiresAt > Date.now()) : [];
     return {account, ...C.exportText([...muted, ...data.bag])};
   }
-  const locked = state.job?.account === account && ['running', 'paused'].includes(state.job.status);
+  const locked = state.job?.account === account && C.activeJob(state.job);
   if (['add', 'pick', 'edit', 'remove', 'clear', 'options', 'text:import'].includes(message.type) && locked) {
     throw new Error('Finish or end the current batch before editing your bag.');
   }
@@ -249,30 +310,26 @@ async function handle(message, sender) {
     case 'clear': data.bag = []; break;
     case 'options': data.options = C.options(message.options); break;
     case 'apply': {
-      if (['running', 'paused'].includes(state.job?.status)) throw new Error('Finish or end the existing batch first.');
+      if (C.activeJob(state.job)) throw new Error('Finish or end the existing batch first.');
       await closeSync(state);
       state.job = C.createJob(account, data.bag, data.options, sender.tab.id);
       // Persist the intent before allocating the tab.
       await persist(state);
       try { state.job.tabId = await runnerTab(state.job); }
-      catch (error) { pause(state.job, error.message); }
+      catch (error) { retry(state.job, error.message); }
       break;
     }
     case 'stop': pause(currentJob(state, account), 'Stopped. Resume when you are ready; saved words stay muted.'); break;
     case 'resume': {
       const job = currentJob(state, account);
-      if (job.status !== 'paused') throw new Error('This batch is already running.');
-      job.status = 'running';
-      job.phase = 'check';
-      job.error = '';
-      job.items[job.index].status = 'pending';
-      try { job.tabId = await runnerTab(job); }
-      catch (error) { pause(job, error.message); }
-      break;
+      if (!['paused', 'retrying'].includes(job.status)) throw new Error('This batch is already running.');
+      await resumeBatch(state);
+      return view(state, account);
     }
     case 'end': {
       const job = currentJob(state, account);
       job.status = 'stopped';
+      job.retryAt = null;
       job.error = 'Batch ended. Unsaved entries are still in your bag.';
       break;
     }
@@ -284,7 +341,7 @@ async function handle(message, sender) {
     default: throw new Error('Unsupported request.');
   }
   await persist(state);
-  if (['apply', 'resume'].includes(message.type) && state.job.status === 'running') await kick(state.job.tabId);
+  if (message.type === 'apply' && state.job.status === 'running') await kick(state.job.tabId);
   return view(state, account);
 }
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
@@ -312,8 +369,8 @@ chrome.tabs.onRemoved.addListener(tabId => {
   exclusively(async () => {
     await boot;
     const state = await readStore();
-    if (state.job?.tabId === tabId && state.job.status === 'running') {
-      pause(state.job, 'The settings tab was closed. Resume to check progress and continue.');
+    if (state.job?.tabId === tabId && ['running', 'retrying'].includes(state.job.status)) {
+      if (state.job.status === 'running') retry(state.job, 'The settings tab was closed. It will reopen automatically.');
       state.job.tabId = null;
       await persist(state);
     }
@@ -330,9 +387,12 @@ chrome.tabs.onUpdated.addListener((tabId, change) => {
     exclusively(async () => {
       await boot;
       const state = await readStore();
-      if (state.job?.tabId === tabId && state.job.status === 'running') {
-        pause(state.job, 'The settings tab left X. Resume to continue.');
-        state.job.tabId = null;
+      if (state.job?.tabId === tabId && ['running', 'retrying'].includes(state.job.status)) {
+        if (change.url.startsWith('chrome-error://')) retry(state.job, 'The settings page failed to load. Retrying automatically.');
+        else {
+          retry(state.job, 'The settings tab left X. A new settings tab will open automatically.');
+          state.job.tabId = null;
+        }
         await persist(state);
       }
       if (state.filterSync?.tabId === tabId && state.filterSync.status === 'running') {

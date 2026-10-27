@@ -1,10 +1,10 @@
 {
   "manifest_version": 3,
   "name": "X Mute Bag",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Pick words from posts or import a text list, review your bag, and add them to X’s muted words. Export your words as text.",
   "minimum_chrome_version": "120",
-  "permissions": ["storage", "scripting"],
+  "permissions": ["storage", "scripting", "alarms"],
   "host_permissions": ["https://x.com/*"],
   "background": {"service_worker": "background.js"},
   "action": {

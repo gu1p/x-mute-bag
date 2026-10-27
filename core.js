@@ -5,6 +5,9 @@
   const FILTER_SYNC_MS = 10 * 60 * 1000;
   const FILTER_CACHE_MS = 15 * 60 * 1000;
   const TEXT_LIMIT = 1024 * 1024;
+  const BATCH_STALE_MS = 90000;
+  const retryDelay = failures => Math.min(300000, 30000 * 2 ** Math.min(4, Math.max(0, failures - 1)));
+  const activeJob = job => ['running', 'retrying', 'paused'].includes(job?.status);
   const clean = text => String(text ?? '').normalize('NFC').trim().replace(/\s+/gu, ' ');
   const key = text => clean(text).toLowerCase();
   const accountKey = value => {
@@ -93,7 +96,8 @@
   function createJob(account, bag, prefs, sourceTabId) {
     if (!bag.length) throw new Error('Add a word to your bag first.');
     return {id: crypto.randomUUID(), account, sourceTabId, tabId: null, status: 'running',
-      phase: 'check', index: 0, options: options(prefs), error: '',
+      runId: crypto.randomUUID(), phase: 'check', index: 0, options: options(prefs), error: '',
+      retryCount: 0, retryAt: null, pauseReason: null,
       items: bag.map(item => ({...item, status: 'pending', attempted: false})), updatedAt: Date.now()};
   }
   function finishItem(job, result) {
@@ -102,6 +106,8 @@
     job.index++;
     job.phase = 'check';
     job.error = '';
+    job.retryCount = 0;
+    job.retryAt = null;
     if (job.index === job.items.length) job.status = 'complete';
     job.updatedAt = Date.now();
   }
@@ -134,7 +140,7 @@
     if (!/^[a-zA-Z0-9_]{1,15}$/.test(handle)) throw new Error('Enter an X @username or profile link.');
     return handle.toLowerCase();
   }
-  const api = {DEFAULTS, FILTER_SYNC_MS, FILTER_CACHE_MS, TEXT_LIMIT, clean, key, accountKey, userHandle, entry, options, add, importText, exportText, edit, pick, tokens, createJob, finishItem, counts, muteDeadline, muteMatcher};
+  const api = {DEFAULTS, FILTER_SYNC_MS, FILTER_CACHE_MS, TEXT_LIMIT, BATCH_STALE_MS, retryDelay, activeJob, clean, key, accountKey, userHandle, entry, options, add, importText, exportText, edit, pick, tokens, createJob, finishItem, counts, muteDeadline, muteMatcher};
   globalThis.XMuteCore = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

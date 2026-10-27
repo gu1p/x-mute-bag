@@ -5,7 +5,7 @@ async function mountHarness(sources, fixture) {
   document.title = 'X Mute Bag · Browser checks';
   document.body.replaceChildren();
   document.body.style.cssText = 'margin:0;background:#000';
-  const data = {local: {}, session: {}}, tabs = new Map(), workerEvents = {};
+  const data = {local: {}, session: {}}, tabs = new Map(), workerEvents = {}, alarms = new Map();
   const model = {account: 'tester', words: [], saves: [], fail: null, uncertain: null, saveDelay: 0};
   let nextTab = 1;
   const errors = [], results = [];
@@ -56,7 +56,18 @@ async function mountHarness(sources, fixture) {
   };
   const workerChrome = {
     storage, tabs: tabApi,
-    runtime: {id: 'xmb-fixture', onMessage: event(workerEvents, 'message')},
+    runtime: {id: 'xmb-fixture', onMessage: event(workerEvents, 'message'), onStartup: event(workerEvents, 'startup'), onInstalled: event(workerEvents, 'installed')},
+    alarms: {
+      get: async name => { const alarm = alarms.get(name); return alarm && {name, scheduledTime: alarm.when}; },
+      clear: async name => { clearTimeout(alarms.get(name)?.timer); return alarms.delete(name); },
+      create: async (name, {when}) => {
+        clearTimeout(alarms.get(name)?.timer);
+        alarms.set(name, {when, timer: setTimeout(() => {
+          alarms.delete(name); workerEvents.alarm?.({name, scheduledTime: when});
+        }, Math.max(0, when - Date.now()))});
+      },
+      onAlarm: event(workerEvents, 'alarm'),
+    },
     action: {onClicked: event(workerEvents, 'clicked'), setBadgeText: async () => {}, setTitle: async () => {}},
     scripting: {executeScript: async () => {}},
   };
@@ -405,14 +416,14 @@ async function mountHarness(sources, fixture) {
     async failures() {
       model.fail = 'fail word';
       await add('first success'); await add('fail word'); await add('last pending');
-      await click('apply'); await until(() => store().job.status === 'paused', 'failure', 25000);
+      await click('apply'); await until(() => store().job.status === 'retrying', 'failure', 25000);
       assert(bag().map(i => i.text).join(',') === 'fail word,last pending', 'pending bag retained');
       model.fail = null;
-      await command('Resume / retry'); await until(() => store().job.status === 'complete', 'retry', 25000);
+      await command('Retry now'); await until(() => store().job.status === 'complete', 'retry', 25000);
       assert(model.saves.filter(s => s.text === 'first success').length === 1, 'confirmed save never repeated');
       model.uncertain = 'uncertain';
-      await add('uncertain'); await click('apply'); await until(() => store().job.status === 'paused', 'uncertain', 25000);
-      await command('Resume / retry'); await until(() => store().job.status === 'complete', 'reconcile', 25000);
+      await add('uncertain'); await click('apply'); await until(() => store().job.status === 'retrying', 'uncertain', 25000);
+      await command('Retry now'); await until(() => store().job.status === 'complete', 'reconcile', 25000);
       assert(model.saves.filter(s => s.text === 'uncertain').length === 1, 'uncertain save never repeated');
       model.uncertain = null;
       pass('Partial failure, retry, and uncertain-save reconciliation');
@@ -428,7 +439,7 @@ async function mountHarness(sources, fixture) {
       await command('Resume / retry'); await until(() => store().job.status === 'complete', 'closed tab resume', 25000);
       assert(model.saves.filter(s => s.text === 'stop first').length === 1, 'resume reconciles in-flight save');
       model.account = 'different';
-      await add('account guard'); await click('apply'); await until(() => store().job.status === 'paused', 'account guard', 25000);
+      await add('account guard'); await click('apply'); await until(() => store().job.status === 'retrying', 'account guard', 25000);
       assert(!model.saves.some(s => s.text === 'account guard'), 'no save under different account');
       model.account = 'tester'; await command('End batch');
       assert(!errors.length, 'no JavaScript errors: ' + errors.join(','));

@@ -6,6 +6,9 @@ const path = require('node:path');
 const C = require('../core.js');
 function harness(backing = {local: {}, session: {}}) {
   const listeners = {};
+  const alarms = backing.alarms ||= new Map();
+  const clock = backing.clock ||= {now: Date.now()};
+  class ClockDate extends Date { static now() { return clock.now; } }
   const event = name => ({addListener: fn => { listeners[name] = fn; }});
   const tabs = new Map([[1, {id: 1, url: 'https://x.com/home'}]]);
   let nextId = 10;
@@ -15,7 +18,12 @@ function harness(backing = {local: {}, session: {}}) {
     set: async obj => Object.assign(backing[area], clone(obj)),
   });
   const chrome = {
-    runtime: {id: 'extension', onMessage: event('message')},
+    runtime: {id: 'extension', onMessage: event('message'), onStartup: event('startup'), onInstalled: event('installed')},
+    alarms: {
+      get: async name => clone(alarms.get(name)),
+      create: async (name, info) => { alarms.set(name, {name, scheduledTime: info.when}); },
+      clear: async name => alarms.delete(name), onAlarm: event('alarm'),
+    },
     storage: {local: storage('local'), session: storage('session')},
     tabs: {
       get: async id => { if (!tabs.has(id)) throw Error('closed'); return tabs.get(id); },
@@ -28,7 +36,7 @@ function harness(backing = {local: {}, session: {}}) {
     action: {onClicked: event('clicked'), setBadgeText: async () => {}, setTitle: async () => {}},
     scripting: {executeScript: async () => {}},
   };
-  const context = vm.createContext({chrome, XMuteCore: C, importScripts() {}, console, URL, Date, crypto});
+  const context = vm.createContext({chrome, XMuteCore: C, importScripts() {}, console, URL, Date: ClockDate, crypto});
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../background.js'), 'utf8'), context);
   async function message(type, fields = {}, tabId = 1, origin = 'https://x.com/home') {
     const result = await new Promise(resolve => listeners.message(
@@ -40,9 +48,18 @@ function harness(backing = {local: {}, session: {}}) {
   const store = () => clone(backing.local.xMuteBag);
   async function runner(type, extra = {}) {
     const job = store().job;
-    return message(type, {jobId: job.id, itemId: job.items[job.index].id, ...extra}, job.tabId);
+    return message(type, {jobId: job.id, runId: job.runId, itemId: job.items[job.index].id, ...extra}, job.tabId);
   }
-  return {message, store, runner, tabs, backing, listeners};
+  async function fireAlarm() {
+    await message('view');
+    const alarm = alarms.get('xmb-batch');
+    assert.ok(alarm, 'batch alarm is scheduled');
+    clock.now = Math.max(clock.now, alarm.scheduledTime);
+    alarms.delete(alarm.name);
+    listeners.alarm(alarm);
+    return message('view');
+  }
+  return {message, store, runner, tabs, backing, listeners, alarms, clock, fireAlarm, chrome};
 }
 test('concurrent bag mutations serialize and do not lose entries', async () => {
   const h = harness();
@@ -132,23 +149,29 @@ test('uncertain save resumes by checking the list before another submission', as
   await h.message('apply');
   await h.runner('runner:missing');
   await h.runner('runner:submit');
-  await h.runner('runner:pause', {error: 'lost response'});
+  await h.runner('runner:failed', {error: 'lost response'});
   assert.equal(h.store().accounts.tester.bag.length, 1);
-  await h.message('resume');
+  await h.fireAlarm();
   assert.equal(h.store().job.phase, 'check');
   assert.equal(h.store().job.items[0].attempted, true);
   await h.runner('runner:found');
   assert.equal(h.store().job.items[0].status, 'added');
 });
-test('worker restart preserves a running job; a new browser session pauses it', async () => {
+test('worker restart restores the alarm; browser restart automatically rechecks the interrupted batch', async () => {
   const h = harness();
   await h.message('add', {text: 'word'});
   await h.message('apply');
+  h.alarms.clear();
   const workerRestart = harness(h.backing);
   assert.equal((await workerRestart.message('view')).job.status, 'running');
+  assert.ok(workerRestart.alarms.has('xmb-batch'));
   h.backing.session = {};
+  h.alarms.clear();
   const browserRestart = harness(h.backing);
-  assert.equal((await browserRestart.message('view')).job.status, 'paused');
+  const restarted = await browserRestart.message('view');
+  assert.equal(restarted.job.status, 'retrying');
+  assert.equal(restarted.job.tabId, null);
+  assert.equal((await browserRestart.fireAlarm()).job.status, 'running');
 });
 test('Stop rejects late saves; End releases the retained bag', async () => {
   const h = harness();
@@ -168,6 +191,103 @@ test('rejects foreign origins, stale entries, and concurrent batches across acco
   await h.message('add', {account: 'other', text: 'another'});
   await assert.rejects(h.message('apply', {account: 'other'}), /existing batch/);
   await assert.rejects(h.runner('runner:missing', {itemId: 'old'}), /advanced/);
+});
+test('automatic retries have capped backoff without an attempt limit and reject callbacks from earlier runs', async () => {
+  const h = harness();
+  await h.message('text:import', {text: 'first\nsecond'});
+  await h.message('apply');
+  const id = h.store().job.id;
+  for (let attempt = 1; attempt <= 9; attempt++) {
+    const previousRun = h.store().job.runId;
+    await h.runner('runner:missing');
+    await h.runner('runner:submit');
+    await h.runner('runner:failed', {error: 'Try again later'});
+    const retry = h.store().job;
+    assert.equal(retry.status, 'retrying');
+    assert.equal(retry.retryCount, attempt);
+    assert.equal(retry.retryAt - h.clock.now, C.retryDelay(attempt));
+    assert.equal(retry.phase, 'verify');
+    await assert.rejects(h.message('text:import', {text: 'locked'}), /current batch/);
+    await h.message('filters:sync', {force: true});
+    assert.equal(h.store().filterSync, undefined, 'sync cannot interfere with a retrying batch');
+    do { await h.fireAlarm(); } while (h.store().job.status === 'retrying');
+    assert.equal(h.store().job.id, id);
+    assert.equal(h.store().job.phase, 'check');
+    assert.notEqual(h.store().job.runId, previousRun);
+    await assert.rejects(h.runner('runner:failed', {runId: previousRun, error: 'late failure'}), /no longer/);
+    assert.equal(h.store().job.status, 'running');
+  }
+  await h.runner('runner:found');
+  assert.equal(h.store().job.retryCount, 0, 'successful progress resets the backoff');
+  assert.deepEqual(h.store().accounts.tester.bag.map(item => item.text), ['second']);
+  await h.runner('runner:found');
+  assert.equal(h.store().job.status, 'complete');
+  assert.equal(h.alarms.size, 0);
+});
+test('Stop and End cancel automatic retries, including late alarms and browser restarts', async () => {
+  for (const command of ['stop', 'end']) {
+    const h = harness();
+    await h.message('add', {text: 'word'}); await h.message('apply');
+    const oldRun = h.store().job.runId;
+    await h.runner('runner:failed', {error: 'Try again'});
+    await h.message(command);
+    const before = h.store().job;
+    assert.equal(h.alarms.size, 0);
+    h.clock.now += 600000;
+    h.listeners.alarm({name: 'xmb-batch'});
+    await h.message('view');
+    assert.deepEqual(h.store().job, before);
+    await assert.rejects(h.runner('runner:found', {runId: oldRun}), /running|active batch/);
+    h.backing.session = {};
+    const restarted = harness(h.backing);
+    assert.equal((await restarted.message('view')).job.status, before.status);
+    assert.equal(restarted.alarms.size, 0);
+  }
+});
+test('closed, stalled, or failed runner tabs recover automatically and never reuse a foreign page', async () => {
+  const h = harness();
+  await h.message('add', {text: 'word'}); await h.message('apply');
+  const originalTab = h.store().job.tabId;
+  await h.chrome.tabs.remove(originalTab);
+  assert.equal((await h.message('view')).job.status, 'retrying');
+  await h.fireAlarm();
+  assert.notEqual(h.store().job.tabId, originalTab);
+  const stalledRun = h.store().job.runId;
+  await h.fireAlarm();
+  assert.equal(h.store().job.status, 'retrying');
+  assert.match(h.store().job.error, /stopped responding/);
+  await h.fireAlarm();
+  assert.notEqual(h.store().job.runId, stalledRun);
+  const failedTab = h.store().job.tabId;
+  h.tabs.get(failedTab).url = 'chrome-error://chromewebdata/';
+  h.listeners.updated(failedTab, {url: 'chrome-error://chromewebdata/'});
+  assert.equal((await h.message('view')).job.status, 'retrying');
+  await h.fireAlarm();
+  assert.equal(h.store().job.tabId, failedTab, 'reuse the owned error tab instead of opening more tabs');
+  h.tabs.get(failedTab).url = 'https://example.com/';
+  h.listeners.updated(failedTab, {url: 'https://example.com/'});
+  assert.equal((await h.message('view')).job.status, 'retrying');
+  await h.fireAlarm();
+  assert.notEqual(h.store().job.tabId, failedTab);
+  assert.equal(h.tabs.get(failedTab).url, 'https://example.com/');
+});
+test('tab allocation failures keep retrying and legacy failure-paused batches migrate without resuming a user Stop', async () => {
+  const h = harness();
+  const create = h.chrome.tabs.create;
+  h.chrome.tabs.create = async () => { throw Error('Browser unavailable'); };
+  await h.message('add', {text: 'word'}); await h.message('apply');
+  assert.equal(h.store().job.status, 'retrying');
+  await h.fireAlarm();
+  assert.equal(h.store().job.retryCount, 2);
+  h.chrome.tabs.create = create;
+  await h.fireAlarm();
+  assert.equal(h.store().job.status, 'running');
+  for (const [error, expected] of [['Try again later', 'retrying'], ['Stopped. Resume when you are ready;', 'paused'], ['The signed-in X account changed.', 'retrying']]) {
+    const backing = structuredClone(h.backing);
+    Object.assign(backing.local.xMuteBag.job, {status: 'paused', pauseReason: undefined, error});
+    const upgraded = harness(backing);
+    assert.equal((await upgraded.message('view')).job.status, expected);
+  }
 });
 test('sync imports existing native mutes, preserves the bag, and removes unmuted terms', async () => {
   const h = harness();

@@ -7,9 +7,9 @@
   let host, shadow, state, active = false, collapsed = false, visible = false;
   let records = [], hover = null, refreshFrame = 0, refreshTimer = 0;
   let anchor = null, shiftHeld = false, pickGeneration = 0, pickQueue = Promise.resolve();
-  let runnerBusy = false, cancelledJob = null, notice = '';
+  let runnerBusy = false, runnerQueued = false, cancelledJob = null, notice = '';
   let transferBusy = false;
-  const locked = () => ['running', 'paused'].includes(state?.job?.status);
+  const locked = () => C.activeJob(state?.job);
   async function request(type, fields = {}) {
     const reply = await chrome.runtime.sendMessage({type, account: X.account(), ...fields});
     if (!reply?.ok) throw new Error(reply?.error || 'The extension was reloaded. Refresh this X tab.');
@@ -46,8 +46,8 @@
       return next;
     } catch (error) { setNotice(error.message); return false; }
   }
-  function transferStatus(message, error = false) {
-    const box = shadow.getElementById('transfer-status');
+  function transferStatus(message, error = false, exporting = false) {
+    const box = shadow.getElementById(exporting ? 'export-status' : 'transfer-status');
     box.textContent = message;
     box.className = error ? 'notice' : 'hint';
   }
@@ -60,6 +60,7 @@
       $('import-text').value = '';
       $('import-file').value = '';
       transferStatus('');
+      transferStatus('', false, true);
     }
     const disabled = !available || locked() || transferBusy;
     $('import-text').disabled = disabled;
@@ -68,9 +69,9 @@
     $('import-text-button').disabled = disabled || !$('import-text').value.trim();
     for (const id of ['export-scope', 'copy-text', 'download-text']) $(id).disabled = !available || transferBusy;
     const syncedAt = available && state.filter?.syncedAt;
-    $('export-hint').textContent = $('export-scope').value === 'bag' ? 'Export the words and expressions currently in your bag.' :
-      (syncedAt ? 'Muted words last synced ' + new Date(syncedAt).toLocaleString() + '. ' : 'Muted words have not been synced yet. ') +
-      'Use Sync muted words below for the latest list.';
+    $('export-hint').textContent = $('export-scope').value === 'bag' ? 'Pending entries only.' :
+      (syncedAt ? 'Last synced ' + new Date(syncedAt).toLocaleString() + '. ' : 'Muted words have not been synced yet. ') +
+      'Refresh under Timeline filters for the latest list.';
   }
   async function exportWords(copy) {
     if (transferBusy || !state || state.account !== X.account()) return;
@@ -94,8 +95,8 @@
         link.click(); link.remove();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
       }
-      transferStatus(result.count + (result.count === 1 ? ' entry ' : ' entries ') + (copy ? 'copied.' : 'exported.'));
-    } catch (error) { transferStatus(error.message, true); }
+      transferStatus(result.count + (result.count === 1 ? ' entry ' : ' entries ') + (copy ? 'copied.' : 'exported.'), false, true);
+    } catch (error) { transferStatus(error.message, true, true); }
     finally { transferBusy = false; renderTransfer(); }
   }
   function createPanel() {
@@ -107,24 +108,26 @@
     shadow.innerHTML = [
       '<style>',
       ':host{all:initial;font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#e8edf2}',
-      '*{box-sizing:border-box} [hidden]{display:none!important}',
+      '*{box-sizing:border-box} [hidden],:host([hidden]){display:none!important}',
       '.panel{font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;width:min(354px,calc(100vw - 32px));background:#151b24;color:#e8edf2;border:1px solid #344052;border-radius:18px;box-shadow:0 18px 60px #0006;overflow:hidden}',
       'header{display:flex;align-items:center;gap:10px;padding:15px 16px} .mark{display:grid;place-items:center;width:31px;height:31px;border-radius:10px;background:#b8f4da;color:#183f32;font-size:19px;font-weight:800}',
       'h2{margin:0;font-size:15px;letter-spacing:-.2px} .identity{font-size:11px;color:#a0adbe} .heading{flex:1}',
+      '#count{display:inline-block;min-width:21px;margin-left:3px;padding:1px 6px;border-radius:10px;background:#ffffff0c;font-size:11px;text-align:center}',
       'button,input,select,textarea{font:inherit} button{cursor:pointer;border:1px solid #465368;border-radius:9px;background:transparent;color:inherit;padding:7px 10px} button:hover{background:#ffffff12} button:disabled{opacity:.42;cursor:default}',
       'button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible,summary:focus-visible{outline:2px solid #79ddba;outline-offset:3px}',
       '.icon{padding:4px 8px;border:0;font-size:18px}.body{border-top:1px solid #344052;padding:14px 16px;max-height:calc(100vh - 105px);overflow:auto}',
       '.pick{width:100%;text-align:left;border-color:#466b60;background:#b8f4da0c}.pick[aria-pressed=true]{border-color:#8fe4c0;color:#b8f4da}.hint{color:#a0adbe;font-size:12px;margin:8px 0 12px}',
-      '.empty{border:1px dashed #465368;border-radius:10px;padding:18px 12px;color:#a0adbe;text-align:center;font-size:12px}',
-      '.entries{list-style:none;padding:0;margin:0;display:grid;gap:6px;max-height:224px;overflow:auto}.entry{display:flex;gap:6px;align-items:center}',
+      '.empty{padding:16px 0 6px;color:#a0adbe;text-align:center;font-size:12px}',
+      '.entries{list-style:none;padding:0;margin:12px 0 0;display:grid;gap:6px;max-height:224px;overflow:auto}.entry{display:flex;gap:6px;align-items:center}',
       'input[type=text],select,textarea{min-width:0;background:#0e141c;border:1px solid #465368;border-radius:8px;color:inherit;padding:8px 9px} .entry input{width:100%}.entry button{border:0;padding:7px}.entry input:disabled{opacity:.7}',
       '.add{display:flex;gap:7px;margin-top:10px}.add input{flex:1;width:100%}.add button{padding:7px 12px}',
-      '.tools{display:flex;justify-content:space-between;align-items:center;margin:10px 0;color:#a0adbe;font-size:12px}.tools button{border:0;padding:2px 0;font-size:12px;text-decoration:underline}',
-      '.filter{border-top:1px solid #344052;margin-top:12px;padding-top:12px;font-size:12px}.filter label{display:flex;align-items:center;gap:6px}.filter button{font-size:12px;margin-top:8px}.filter p{margin:7px 0;color:#a0adbe}',
+      '.tools{display:flex;justify-content:flex-end;margin:5px 0 0;color:#a0adbe;font-size:11px}.tools button{border:0;padding:2px 0;font-size:11px}',
+      '.filter{padding-top:12px;font-size:12px}.filter label{display:flex;align-items:center;gap:6px}.filter button{font-size:12px;margin-top:8px}.filter p{margin:7px 0;color:#a0adbe}',
       '.rules{list-style:none;padding:0;margin:12px 0 0;display:grid;gap:7px;max-height:180px;overflow:auto}.rule{display:flex;align-items:center;gap:6px;font-size:12px}.rule label{display:flex;align-items:center;gap:6px;flex:1}.rule button{border:0;padding:3px 7px}.accounts summary{color:inherit;font-weight:600}.accounts .hint{margin-bottom:8px}',
       'details{border-top:1px solid #344052;padding-top:11px;margin-top:12px}summary{cursor:pointer;font-size:12px;color:#a0adbe}.options{display:grid;gap:9px;padding-top:12px;font-size:12px}.options label{display:flex;align-items:center;gap:7px}.options select{margin-left:auto;max-width:195px;font-size:12px}input[type=checkbox]{accent-color:#8fe4c0}',
+      '.more-options>summary{list-style:none;text-align:center}.more-options>summary::-webkit-details-marker{display:none}.more-options>summary::after{content:"+";float:right}.more-options[open]>summary::after{content:"−"}.more-options details>summary{color:inherit;font-weight:500}.more-options details{padding-top:10px;margin-top:10px}',
       '.apply{margin-top:14px;width:100%;background:#b8f4da;color:#163d2f;border-color:#b8f4da;font-weight:700;padding:10px}.apply:hover{background:#9ee6c8}',
-      '.status{margin:12px 0 0;padding:10px 12px;background:#ffffff08;border-radius:10px;font-size:12px;overflow-wrap:anywhere}.progress{height:4px;background:#344052;border-radius:3px;margin:9px 0}.bar{height:100%;background:#8fe4c0;border-radius:3px;transition:width .2s}',
+      '.status{margin:10px 0 0;padding:10px 12px;background:#ffffff08;border-radius:10px;font-size:12px;overflow-wrap:anywhere}.status-heading{display:flex;align-items:center;gap:8px}.status-heading>div:first-child{flex:1;min-width:0}.status-heading .batch-actions{margin:0}.status .hint{font-size:11px;margin:3px 0 0}.status details{border:0;padding-top:0;margin-top:7px}.status details summary{font-size:11px}.progress{height:3px;background:#344052;border-radius:3px;margin:9px 0}.bar{height:100%;background:#8fe4c0;border-radius:3px;transition:width .2s}',
       '.batch-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}.batch-actions button{font-size:12px;padding:5px 9px}.notice{font-size:12px;color:#ffd5b5;margin:10px 0 0;overflow-wrap:anywhere}',
       '.transfer summary{color:inherit;font-weight:600}.transfer textarea{display:block;width:100%;resize:vertical;min-height:100px;max-height:240px;font-size:12px}.transfer .export-label{display:grid;gap:6px;margin-top:14px;font-size:12px}.transfer select{width:100%;font-size:12px}.transfer p{overflow-wrap:anywhere}',
       ':host([data-light]) .panel{background:#fff;color:#162521;border-color:#d5dfda;box-shadow:0 14px 60px #10271c22}:host([data-light]) .body,:host([data-light]) details{border-color:#d5dfda}',
@@ -136,31 +139,35 @@
       '<header><div class="mark" aria-hidden="true"><svg width="21" height="21" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6h10l1 11H4L5 6ZM7 6V4a3 3 0 0 1 6 0v2M7 11h6"/></svg></div><div class="heading"><h2>Mute bag <span id="count">0</span></h2><div class="identity" id="identity">Words you would rather skip</div></div>',
       '<button class="icon" id="collapse" aria-label="Collapse bag" aria-expanded="true">−</button><button class="icon" id="close" aria-label="Close bag">×</button></header>',
       '<div class="body" id="body"><button class="pick" id="pick" aria-pressed="false">Start picking words</button>',
-      '<p class="hint">Click a word, then Shift-click the last word to pick a phrase. Edit or add entries below.</p>',
-      '<div class="empty" id="empty">A quieter timeline starts with a word.</div><ul class="entries" id="entries" aria-label="Collected words"></ul>',
+      '<p class="hint" id="pick-hint" hidden>Shift-click the last word to select a phrase.</p>',
+      '<div class="empty" id="empty">Pick a word or add one below.</div><ul class="entries" id="entries" aria-label="Collected words"></ul>',
       '<form class="add" id="add-form"><input id="new-word" type="text" aria-label="Add a word or phrase" placeholder="Add a word or phrase…" maxlength="560" autocomplete="off"><button id="add" type="submit" aria-label="Add entry">+</button></form>',
-      '<div class="tools"><span id="bag-info">Saved on this device</span><button id="clear">Clear bag</button></div>',
-      '<details class="transfer" id="transfer"><summary>Import / export words</summary>',
-      '<p class="hint" id="import-hint">Paste text or load a UTF-8 .txt file (up to 1 MB). One word or expression per line. Blank lines and duplicates are skipped.</p>',
-      '<textarea id="import-text" aria-label="Words to import" aria-describedby="import-hint" rows="5" placeholder="spoiler&#10;John Smith&#10;another expression" spellcheck="false"></textarea>',
+      '<div class="tools" id="bag-tools"><button id="clear">Clear bag</button></div>',
+      '<button class="apply" id="apply">Apply muted words</button>',
+      '<div class="status" id="status" role="status" aria-live="polite" hidden><div class="status-heading"><div><div id="status-text"></div><p class="hint" id="status-next" hidden></p></div><div class="batch-actions" id="batch-actions"></div></div>',
+      '<details id="batch-details"><summary>Details</summary><div class="progress"><div class="bar" id="bar"></div></div><div id="status-counts"></div><p id="status-error"></p><div class="batch-actions" id="batch-extra-actions"></div></details></div>',
+      '<details class="more-options" id="more-options"><summary>More options</summary>',
+      '<div class="transfer" id="transfer"><details id="import-tools"><summary>Import words</summary>',
+      '<p class="hint" id="import-hint">One word or expression per line. Blank lines and duplicates are skipped.</p>',
+      '<textarea id="import-text" aria-label="Words to import" aria-describedby="import-hint" rows="4" placeholder="spoiler&#10;John Smith&#10;another expression" spellcheck="false"></textarea>',
       '<input id="import-file" type="file" accept=".txt,text/plain" aria-label="Import text file" hidden>',
       '<div class="batch-actions"><button id="load-text">Load .txt file</button><button id="import-text-button">Add lines to bag</button></div>',
-      '<p class="hint">Review imported entries in your bag, then click Apply to mute them on X.</p>',
-      '<p class="hint" id="transfer-status" role="status" aria-live="polite"></p>',
+      '<p class="hint">Review your bag, then Apply.</p>',
+      '<p class="hint" id="transfer-status" role="status" aria-live="polite"></p></details>',
+      '<details id="export-tools"><summary>Export words</summary>',
       '<label class="export-label">Export<select id="export-scope" aria-label="Export source"><option value="all">Muted words + bag</option><option value="bag">Bag only</option></select></label>',
       '<p class="hint" id="export-hint"></p><div class="batch-actions"><button id="copy-text">Copy text</button><button id="download-text">Download .txt</button></div>',
-      '<p class="hint">Text exports contain words only. Mute settings and account reply rules are not included.</p>',
-      '</details>',
-      '<details><summary id="summary">Forever · Home + notifications</summary><div class="options">',
+      '<p class="hint">Words only; settings and account rules are not included.</p>',
+      '<p class="hint" id="export-status" role="status" aria-live="polite"></p></details></div>',
+      '<details id="mute-options"><summary id="summary">Mute settings · Forever</summary><div class="options">',
       '<label><input type="checkbox" id="home">Home timeline</label><label><input type="checkbox" id="notifications">Notifications</label>',
       '<label>From<select id="audience" aria-label="Notification audience"><option value="anyone">Anyone</option><option value="unfollowed">People you don’t follow</option></select></label>',
       '<label>Duration<select id="duration" aria-label="Mute duration"><option value="forever">Forever</option><option value="24h">24 hours</option><option value="7d">7 days</option><option value="30d">30 days</option></select></label>',
-      '</div></details><button class="apply" id="apply">Apply muted words</button>',
+      '</div></details><details id="filter-settings"><summary>Timeline filters</summary>',
       '<div class="filter"><label><input id="filter-enabled" type="checkbox" checked>Hide muted posts, including quotes</label><p id="filter-info" role="status"></p><button id="sync-muted">Sync muted words</button></div>',
-      '<details class="accounts" open><summary>Account filters <span id="reply-count"></span></summary><p class="hint">Hide replies to other accounts and their attached context in feeds. Keep original posts and self-threads.</p>',
+      '<details class="accounts" id="account-settings"><summary>Account filters <span id="reply-count"></span></summary><p class="hint">Hide replies to other accounts. Keep original posts and self-threads.</p>',
       '<form class="add" id="reply-form"><input id="reply-handle" type="text" aria-label="Hide replies from account" placeholder="@username or X profile link" list="reply-suggestions" autocomplete="off" maxlength="200"><datalist id="reply-suggestions"></datalist><button id="reply-add" type="submit">Add</button></form>',
-      '<ul class="rules" id="reply-rules" aria-label="Accounts whose replies are hidden"></ul><p class="hint">Applies immediately · Saved only on this device</p></details>',
-      '<div class="status" id="status" role="status" aria-live="polite" hidden><div id="status-text"></div><div class="progress"><div class="bar" id="bar"></div></div><div id="status-error"></div><div class="batch-actions" id="batch-actions"></div></div>',
+      '<ul class="rules" id="reply-rules" aria-label="Accounts whose replies are hidden"></ul><p class="hint">Applies immediately · This device only</p></details></details></details>',
       '<p class="notice" id="notice" role="alert" hidden></p></div></section>',
     ].join('');
     document.documentElement.append(host);
@@ -170,7 +177,7 @@
     $('pick').onclick = () => setPicking(!active);
     $('clear').onclick = () => action('clear');
     $('import-text').oninput = () => { transferStatus(''); renderTransfer(); };
-    $('export-scope').onchange = () => { transferStatus(''); renderTransfer(); };
+    $('export-scope').onchange = () => { transferStatus('', false, true); renderTransfer(); };
     $('load-text').onclick = () => $('import-file').click();
     $('import-file').onchange = async () => {
       const file = $('import-file').files[0], account = X.account();
@@ -236,7 +243,7 @@
     const filter = XMuteTimeline.status();
     $('filter-enabled').checked = filter.enabled;
     $('filter-enabled').disabled = !state;
-    $('sync-muted').disabled = !state || !filter.enabled || filter.syncing || state.job?.status === 'running';
+    $('sync-muted').disabled = !state || !filter.enabled || filter.syncing || ['running', 'retrying'].includes(state.job?.status);
     $('filter-info').textContent = filter.error || (filter.syncing ? 'Syncing muted words from X…' :
       filter.enabled ? filter.words + ' muted entries' : 'Muted-word filtering paused');
     $('filter-info').textContent += ' · ' + filter.hidden + ' posts hidden on this page';
@@ -273,11 +280,13 @@
     }
     $('identity').textContent = state ? '@' + state.account : 'Sign in to X to start';
     $('count').textContent = String(bag.length);
+    $('count').hidden = !bag.length;
     $('body').hidden = collapsed;
     $('collapse').textContent = collapsed ? '+' : '−';
     $('collapse').setAttribute('aria-label', collapsed ? 'Expand bag' : 'Collapse bag');
     $('collapse').setAttribute('aria-expanded', String(!collapsed));
-    $('pick').textContent = active ? '● Picking words · Esc to stop' : 'Start picking words';
+    $('pick').textContent = active ? 'Picking words · Esc to stop' : 'Start picking words';
+    $('pick-hint').hidden = !active;
     $('pick').setAttribute('aria-pressed', String(active));
     $('pick').disabled = disabled;
     const signature = JSON.stringify([bag, disabled]);
@@ -306,30 +315,37 @@
       }
     }
     $('empty').hidden = bag.length > 0;
+    $('entries').hidden = !bag.length;
+    $('bag-tools').hidden = !bag.length;
     $('clear').disabled = disabled || !bag.length;
     $('new-word').disabled = disabled; $('add').disabled = disabled;
     const prefs = state?.options || C.DEFAULTS;
     for (const name of ['home', 'notifications']) { $(name).checked = prefs[name]; $(name).disabled = disabled; }
     for (const name of ['audience', 'duration']) { $(name).value = prefs[name]; $(name).disabled = disabled || (name === 'audience' && !prefs.notifications); }
     const duration = {forever: 'Forever', '24h': '24 hours', '7d': '7 days', '30d': '30 days'}[prefs.duration];
-    $('summary').textContent = duration + ' · ' + (prefs.home ? 'Home' : '') + (prefs.home && prefs.notifications ? ' + ' : '') + (prefs.notifications ? 'notifications' : '');
+    $('summary').textContent = 'Mute settings · ' + duration;
     $('apply').disabled = disabled || !bag.length;
     $('apply').textContent = 'Apply ' + (bag.length ? bag.length + ' muted ' + (bag.length === 1 ? 'word' : 'words') : 'muted words');
     const job = state?.job;
-    $('status').hidden = !job;
+    $('status').hidden = !job || job.status === 'stopped' || (job.status === 'complete' && bag.length > 0);
     if (job) {
       const counts = C.counts(job), finished = counts.added + counts.skipped;
-      $('status-text').textContent = (job.status === 'running' ? 'Applying ' + Math.min(job.index + 1, counts.total) + '/' + counts.total + ' · ' : '') +
-        counts.added + ' added · ' + counts.skipped + ' already muted' + (counts.failed ? ' · ' + counts.failed + ' unresolved' : '') +
-        (job.status === 'complete' ? ' · Done' : '');
+      $('status-text').textContent = job.status === 'running' ? 'Applying ' + Math.min(job.index + 1, counts.total) + ' of ' + counts.total :
+        job.status === 'retrying' ? 'Retrying automatically' : job.status === 'paused' ? 'Stopped' : 'Done · ' + finished + ' processed';
+      $('status-next').hidden = job.status !== 'retrying';
+      $('status-next').textContent = job.status === 'retrying' ? 'Next attempt at ' + new Date(job.retryAt).toLocaleTimeString() : '';
+      $('status-counts').textContent = counts.added + ' added · ' + counts.skipped + ' already muted' +
+        (counts.failed ? ' · ' + counts.failed + ' unresolved' : '') + (job.retryCount ? ' · ' + job.retryCount + ' retries' : '');
       $('status-error').textContent = job.error || '';
       $('bar').style.width = (finished / counts.total * 100) + '%';
       $('batch-actions').replaceChildren();
-      const commands = job.status === 'running' ? [['Stop', 'stop'], ['Settings tab', 'show-tab']] :
-        job.status === 'paused' ? [['Resume / retry', 'resume'], ['Settings tab', 'show-tab'], ['End batch', 'end']] : [];
-      for (const [label, command] of commands) {
+      $('batch-extra-actions').replaceChildren();
+      const commands = ['running', 'retrying'].includes(job.status) ? [['Stop', 'stop']] : job.status === 'paused' ? [['Resume / retry', 'resume']] : [];
+      const extras = C.activeJob(job) ? [...(job.status === 'retrying' ? [['Retry now', 'resume']] : []), ['Settings tab', 'show-tab'], ['End batch', 'end']] : [];
+      for (const [label, command] of [...commands, ...extras]) {
         const button = document.createElement('button'); button.textContent = label;
-        button.onclick = () => action(command); $('batch-actions').append(button);
+        button.onclick = () => action(command);
+        $(['stop', 'resume'].includes(command) && label !== 'Retry now' ? 'batch-actions' : 'batch-extra-actions').append(button);
       }
     }
     setNotice(notice);
@@ -506,17 +522,17 @@
       if (job) {
         if (cancelledJob === job.id) throw new Error('The batch was stopped.');
         const actual = X.account();
-        if (actual && actual !== job.account) throw new Error('The signed-in X account changed. Switch back before resuming.');
-        if (/^\/i\/flow\/login|^\/login/.test(location.pathname)) throw new Error('Sign in to X, then resume the batch.');
+        if (actual && actual !== job.account) throw new Error('Waiting for @' + job.account + '. Switch back; retries will continue automatically.');
+        if (/^\/i\/flow\/login|^\/login/.test(location.pathname)) throw new Error('Sign in to @' + job.account + ' on X. Retrying automatically.');
       }
       const result = probe();
       if (result) return result;
       await new Promise(resolve => setTimeout(resolve, 150));
     }
-    throw new Error('Timed out ' + label + '. Open the settings tab and retry.');
+    throw new Error('Timed out ' + label + '. Retrying automatically.');
   }
   async function runBatch() {
-    if (runnerBusy) return;
+    if (runnerBusy) { runnerQueued = true; return; }
     runnerBusy = true;
     let job;
     try {
@@ -525,9 +541,9 @@
       cancelledJob = null;
       while (job?.status === 'running') {
         await waitFor(() => X.account() === job.account, job, 'waiting for your X account');
-        if (![X.ADD, X.LIST].includes(location.pathname)) throw new Error('The settings tab left muted words. Resume to continue.');
+        if (![X.ADD, X.LIST].includes(location.pathname)) throw new Error('The settings tab left muted words. Retrying automatically.');
         const item = job.items[job.index];
-        const send = (type, extra = {}) => request(type, {account: job.account, jobId: job.id, itemId: item.id, ...extra});
+        const send = (type, extra = {}) => request(type, {account: job.account, jobId: job.id, runId: job.runId, itemId: item.id, ...extra});
         const expectedPath = job.phase === 'form' ? X.ADD : X.LIST;
         if (location.pathname !== expectedPath) {
           location.assign('https://x.com' + expectedPath);
@@ -555,7 +571,8 @@
             return X.ready(item.text, job.options);
           }, job, 'preparing the muted word');
           await send('runner:submit');
-          if (cancelledJob === job.id || X.account() !== job.account) throw new Error('The batch was interrupted before saving.');
+          if (cancelledJob === job.id) throw new Error('The batch was stopped.');
+          if (X.account() !== job.account) throw new Error('Waiting for @' + job.account + '. Switch back; retries will continue automatically.');
           if (!X.ready(item.text, job.options)) throw new Error('The form changed before saving. Retry to check progress.');
           X.form().save.click();
           await waitFor(() => {
@@ -567,9 +584,13 @@
       }
     } catch (error) {
       if (job) {
-        await request('runner:pause', {account: job.account, jobId: job.id, itemId: job.items[job.index]?.id, error: error.message}).catch(() => {});
+        await request('runner:failed', {account: job.account, jobId: job.id, runId: job.runId, itemId: job.items[job.index]?.id,
+          error: error.message}).catch(() => {});
       }
-    } finally { runnerBusy = false; }
+    } finally {
+      runnerBusy = false;
+      if (runnerQueued) { runnerQueued = false; runBatch(); }
+    }
   }
   chrome.runtime.onMessage.addListener((message, _sender, respond) => {
     if (message.type === 'TOGGLE') {
