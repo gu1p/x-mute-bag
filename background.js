@@ -91,7 +91,10 @@ async function filters(message, sender, state, account) {
     return filterView(state, account);
   }
   if (message.type === 'filters:import') {
-    if (new URL(sender.url || sender.tab.url).pathname !== '/settings/muted_keywords' || !Array.isArray(message.words)) {
+    // sender.url can remain the document's original URL after X changes routes
+    // with history.pushState. Chrome's tab URL reflects the current settings page.
+    const page = new URL(sender.tab.url || sender.url);
+    if (page.origin !== 'https://x.com' || page.pathname !== '/settings/muted_keywords' || !Array.isArray(message.words)) {
       throw new Error('Muted words can only be imported from X’s settings list.');
     }
     if (message.syncId && (sync?.id !== message.syncId || sync.tabId !== sender.tab.id || sync.account !== account || sync.status !== 'running')) {

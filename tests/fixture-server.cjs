@@ -18,11 +18,12 @@ module.exports = async function startFixtureServer(model, fixture) {
     response.setHeader('Cache-Control', 'no-store');
     try {
       const url = new URL(request.url, 'https://x.com');
-      if (url.pathname === '/__fixture/state') return json({account: model.account, words: model.words});
+      if (url.pathname === '/__fixture/state') return json({account: model.account, words: model.words, spa: !!model.spa, fullAdd: !!model.fullAdd, listDelay: model.listDelay || 0});
       if (url.pathname === '/__fixture/save') {
         const chunks = [];
         for await (const chunk of request) chunks.push(chunk);
         const value = JSON.parse(Buffer.concat(chunks).toString());
+        model.saveTimes?.push(Date.now());
         model.saves.push(value);
         if (model.saveDelay) await new Promise(resolve => setTimeout(resolve, model.saveDelay));
         if (model.fail === value.text) return json({error: 'Try again later: fixture failure'});
@@ -32,6 +33,7 @@ module.exports = async function startFixtureServer(model, fixture) {
         return json({ok: true});
       }
       response.setHeader('Content-Type', 'text/html; charset=utf-8');
+      if (request.headers['sec-fetch-dest'] === 'document') model.documents?.push(url.pathname);
       response.end(fixture);
     } catch (error) { response.statusCode = 500; response.end(error.message); }
   });

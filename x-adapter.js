@@ -17,6 +17,15 @@
     const snapshot = mutedSnapshot();
     return snapshot ? new Set(snapshot.map(word => word.key)) : null;
   }
+  function openAddForm() {
+    if (location.pathname !== LIST) return false;
+    const region = details();
+    const link = region?.querySelector('a[href="/settings/add_muted_keyword"]');
+    if (!link || region.querySelector('[role="progressbar"]') || link.getAttribute('aria-disabled') === 'true') return false;
+    // Let X's router reuse the current page instead of downloading the app again.
+    link.click();
+    return true;
+  }
   function mutedSnapshot() {
     if (location.pathname !== LIST) return null;
     const region = details();
@@ -162,5 +171,5 @@
     }
     return targets;
   }
-  globalThis.XMuteX = {LIST, ADD, account, list, mutedSnapshot, postTexts, postAuthor, replyInfo, replyTargets, form, setKeyword, setOptions, ready, error};
+  globalThis.XMuteX = {LIST, ADD, account, list, mutedSnapshot, openAddForm, postTexts, postAuthor, replyInfo, replyTargets, form, setKeyword, setOptions, ready, error};
 })();

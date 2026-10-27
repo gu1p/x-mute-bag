@@ -13,10 +13,25 @@
 <script>
 const main=document.querySelector('main');
 const esc=s=>s.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+let spa=false,fullAdd=false;
+function navigate(path){
+ if(spa&&!(fullAdd&&path==='/settings/add_muted_keyword')){history.pushState({},'',path);return render();}
+ location.assign(path);
+}
+document.addEventListener('click',event=>{
+ const link=event.target.closest('a[href="/settings/add_muted_keyword"]');
+ if(link){event.preventDefault();navigate(link.getAttribute('href'));}
+});
 async function render(){
  const data=await (await fetch('/__fixture/state')).json();
+ spa=!!data.spa;
+ fullAdd=!!data.fullAdd;
  document.querySelector('[data-testid=AppTabBar_Profile_Link]').href='/'+data.account;
  if(location.pathname==='/settings/muted_keywords'){
+  if(data.listDelay){
+   main.innerHTML='<section role="region"><h2>Muted words</h2><a href="/settings/add_muted_keyword">+</a><div role="progressbar">Loading</div></section>';
+   await new Promise(resolve=>setTimeout(resolve,data.listDelay));
+  }
   main.innerHTML='<section role="region"><h2>Muted words</h2><a href="/settings/add_muted_keyword" aria-label="Add muted word or phrase">+</a><p>Words muted in your Home timeline and notifications.</p>'+data.words.map(w=>'<div role="link" tabindex="0"><div><div><span>'+esc(w.text)+'</span></div><div class="duration">Forever</div></div><div><button aria-label="Unmute">Unmute</button></div></div>').join('')+'</section>';
  }else if(location.pathname==='/settings/add_muted_keyword'){
   main.innerHTML='<section role="region"><h2>Add muted word</h2><label>Enter word or phrase<input name="keyword" type="text"></label><h2>Mute from</h2><label>Home timeline<input type="checkbox" checked></label><label>Notifications<input role="switch" type="checkbox" checked></label><label>From anyone<input type="radio" name="mute_notifications_option" checked></label><label>From people you don’t follow<input type="radio" name="mute_notifications_option"></label><h2>Duration</h2>'+['Until you unmute the word','24 hours','7 days','30 days'].map((s,i)=>'<label>'+s+'<input type="radio" name="time_duration" '+(!i?'checked':'')+'></label>').join('')+'<button data-testid="settingsDetailSave" disabled>Save</button><div role="alert"></div></section>';
@@ -28,7 +43,7 @@ async function render(){
    save.disabled=true;
    const result=await (await fetch('/__fixture/save',{method:'POST',body:JSON.stringify(body)})).json();
    if(result.error){main.querySelector('[role=alert]').textContent=result.error;save.disabled=false;}
-   else location.assign('/settings/muted_keywords');
+   else navigate('/settings/muted_keywords');
   };
  }else{
   main.innerHTML='<h1>Home</h1><article data-testid="tweet"><div data-testid="tweetText" lang="en">Café, cats and dogs. “Café” again. <a href="/topic">#Topic</a> from @some_user.</div></article><article data-testid="tweet"><div data-testid="tweetText" lang="en">An inline <span>multi</span><strong>part</strong> word and don’t.</div></article><div id="spacer"></div>';

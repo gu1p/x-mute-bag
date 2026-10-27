@@ -38,9 +38,9 @@ function harness(backing = {local: {}, session: {}}) {
   };
   const context = vm.createContext({chrome, XMuteCore: C, importScripts() {}, console, URL, Date: ClockDate, crypto});
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../background.js'), 'utf8'), context);
-  async function message(type, fields = {}, tabId = 1, origin = 'https://x.com/home') {
+  async function message(type, fields = {}, tabId = 1, origin = 'https://x.com/home', documentUrl = origin) {
     const result = await new Promise(resolve => listeners.message(
-      {type, account: 'tester', ...fields}, {id: 'extension', url: origin, tab: {id: tabId, url: origin}}, resolve
+      {type, account: 'tester', ...fields}, {id: 'extension', url: documentUrl, tab: {id: tabId, url: origin}}, resolve
     ));
     if (!result.ok) throw Error(result.error);
     return clone(result.value);
@@ -100,7 +100,7 @@ test('text export includes cached mutes and pending words, supports bag only, an
   await h.message('text:import', {account: 'other', text: 'private'});
   const filter = h.backing.local.xMuteBag.accounts.tester.filter;
   filter.terms[0].validUntil = 1; // Export the last known list even when automatic filtering is stale.
-  filter.terms.push({text: 'expired', key: 'expired', expiresAt: Date.now() - 1});
+  filter.terms.push({text: 'expired', key: 'expired', expiresAt: h.clock.now - 1});
   const before = h.store();
   assert.deepEqual(await h.message('text:export', {scope: 'all'}), {account: 'tester', count: 3, text: 'Café\nSaved phrase\nPending phrase\n'});
   assert.deepEqual(await h.message('text:export', {scope: 'bag'}), {account: 'tester', count: 2, text: 'CAFÉ\nPending phrase\n'});
@@ -307,6 +307,14 @@ test('sync imports existing native mutes, preserves the bag, and removes unmuted
   await h.message('filters:import', {words: []}, 1, 'https://x.com/settings/muted_keywords');
   assert.deepEqual(h.store().accounts.tester.filter.terms, []);
 });
+test('list imports use the current tab route after same-document navigation, not the original document URL', async () => {
+  const h = harness(), list = 'https://x.com/settings/muted_keywords', add = 'https://x.com/settings/add_muted_keyword';
+  await h.message('filters:import', {words: [{text: 'saved', forever: true}]}, 1, list, add);
+  assert.deepEqual(h.store().accounts.tester.filter.terms.map(item => item.text), ['saved']);
+  await assert.rejects(h.message('filters:import', {words: []}, 1, add, list), /settings list/);
+  await assert.rejects(h.message('filters:import', {words: []}, 1, 'https://example.com/settings/muted_keywords', list), /settings list/);
+  assert.deepEqual(h.store().accounts.tester.filter.terms.map(item => item.text), ['saved']);
+});
 test('sync is account-scoped, throttled, and never consumes another account’s list', async () => {
   const h = harness();
   await h.message('filters:sync');
@@ -331,14 +339,14 @@ test('confirmed Apply entries persist after the bag empties and expire on schedu
   const data = h.store().accounts.tester;
   assert.equal(data.bag.length, 0);
   assert.equal(data.filter.terms[0].text, 'John Smith');
-  assert.ok(data.filter.terms[0].expiresAt > Date.now() + 86300000);
-  assert.ok(data.filter.terms[0].validUntil <= Date.now() + C.FILTER_CACHE_MS);
+  assert.ok(data.filter.terms[0].expiresAt > h.clock.now + 86300000);
+  assert.ok(data.filter.terms[0].validUntil <= h.clock.now + C.FILTER_CACHE_MS);
   assert.equal((await h.message('filters:get', {account: 'other'})).filter.terms.length, 0);
 });
 test('a renewed native mute replaces an expired local deadline', async () => {
   const h = harness();
   await h.message('filters:import', {words: [{text: 'renewed', forever: false}]}, 1, 'https://x.com/settings/muted_keywords');
-  h.backing.local.xMuteBag.accounts.tester.filter.terms[0].expiresAt = Date.now() - 1;
+  h.backing.local.xMuteBag.accounts.tester.filter.terms[0].expiresAt = h.clock.now - 1;
   await h.message('filters:import', {words: [{text: 'renewed', forever: false}]}, 1, 'https://x.com/settings/muted_keywords');
   const term = h.store().accounts.tester.filter.terms[0];
   assert.equal(term.expiresAt, null);

@@ -8,6 +8,7 @@
   let records = [], hover = null, refreshFrame = 0, refreshTimer = 0;
   let anchor = null, shiftHeld = false, pickGeneration = 0, pickQueue = Promise.resolve();
   let runnerBusy = false, runnerQueued = false, cancelledJob = null, notice = '';
+  const runnerWaiters = new Set();
   let transferBusy = false;
   const locked = () => C.activeJob(state?.job);
   async function request(type, fields = {}) {
@@ -517,8 +518,8 @@
   }).observe(document.documentElement, {childList: true, subtree: true, characterData: true});
 
   async function waitFor(probe, job, label, timeout = 20000) {
-    const start = Date.now();
-    while (Date.now() - start < timeout) {
+    const deadline = Date.now() + timeout;
+    const inspect = () => {
       if (job) {
         if (cancelledJob === job.id) throw new Error('The batch was stopped.');
         const actual = X.account();
@@ -527,14 +528,40 @@
       }
       const result = probe();
       if (result) return result;
-      await new Promise(resolve => setTimeout(resolve, 150));
-    }
-    throw new Error('Timed out ' + label + '. Retrying automatically.');
+      if (Date.now() >= deadline) throw new Error('Timed out ' + label + '. Retrying automatically.');
+      return null;
+    };
+    const ready = inspect();
+    if (ready) return ready;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (error, value) => {
+        settled = true;
+        observer.disconnect(); clearInterval(timer); runnerWaiters.delete(check);
+        for (const event of ['input', 'change']) document.removeEventListener(event, check, true);
+        window.removeEventListener('popstate', check);
+        if (error) reject(error); else resolve(value);
+      };
+      const check = () => {
+        if (settled) return;
+        try { const result = inspect(); if (result) finish(null, result); }
+        catch (error) { finish(error); }
+      };
+      const observer = new MutationObserver(check);
+      observer.observe(document.documentElement, {subtree: true, childList: true, characterData: true, attributes: true});
+      for (const event of ['input', 'change']) document.addEventListener(event, check, true);
+      window.addEventListener('popstate', check);
+      runnerWaiters.add(check);
+      // Only a backstop for deadlines and property changes without DOM events.
+      // Successful progress wakes on changes, even when background timers are throttled.
+      const timer = setInterval(check, 1000);
+      check();
+    });
   }
   async function runBatch() {
     if (runnerBusy) { runnerQueued = true; return; }
     runnerBusy = true;
-    let job;
+    let job, importedSnapshot = '';
     try {
       job = await request('runner:discover');
       if (!job) return;
@@ -546,16 +573,21 @@
         const send = (type, extra = {}) => request(type, {account: job.account, jobId: job.id, runId: job.runId, itemId: item.id, ...extra});
         const expectedPath = job.phase === 'form' ? X.ADD : X.LIST;
         if (location.pathname !== expectedPath) {
-          location.assign('https://x.com' + expectedPath);
-          return;
+          if (expectedPath === X.ADD && X.openAddForm()) {
+            await waitFor(() => X.form(), job, 'opening the muted-word form');
+          } else {
+            location.assign('https://x.com' + expectedPath);
+            return;
+          }
         }
         if (job.phase === 'check' || job.phase === 'verify') {
-          await waitFor(() => X.list(), job, 'loading the muted-word list');
-          // Allow the native list to settle after its loading indicator disappears.
-          await new Promise(resolve => setTimeout(resolve, 450));
-          const words = await waitFor(() => X.list(), job, 'reading muted words');
-          const snapshot = X.mutedSnapshot();
-          if (snapshot) await request('filters:import', {account: job.account, words: snapshot});
+          const snapshot = await waitFor(() => X.mutedSnapshot(), job, 'reading muted words');
+          const words = new Set(snapshot.map(word => word.key));
+          const signature = JSON.stringify(snapshot);
+          if (signature !== importedSnapshot) {
+            await request('filters:import', {account: job.account, words: snapshot});
+            importedSnapshot = signature;
+          }
           if (words.has(item.key)) job = await send('runner:found');
           else if (job.phase === 'check') job = await send('runner:missing');
           else {
@@ -604,12 +636,13 @@
       })().catch(error => setNotice(error.message));
       respond({ok: true});
     }
-    if (message.type === 'RUN') { runBatch(); respond({ok: true}); }
+    if (message.type === 'RUN') { for (const check of runnerWaiters) check(); runBatch(); respond({ok: true}); }
   });
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' || !changes.xMuteBag) return;
     const next = changes.xMuteBag.newValue?.job;
     if (next && next.status !== 'running') cancelledJob = next.id;
+    for (const check of runnerWaiters) check();
     if (visible) refresh().catch(error => setNotice(error.message));
   });
   XMuteTimeline.subscribe(() => { if (visible) render(); });
